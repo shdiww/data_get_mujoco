@@ -44,6 +44,16 @@ class InputListener:
             mink.move_mocap_to_frame(self.model, self.data, "target", "attachment_site", "site")
             self.gripper_target = 0.04
 
+        # 切换相机视角 (V键)
+        if act == glfw.PRESS and key == glfw.KEY_V:
+            if self.cam.type == mujoco.mjtCamera.mjCAMERA_FREE:
+                cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "overview")
+                if cam_id != -1:
+                    self.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
+                    self.cam.fixedcamid = cam_id
+            else:
+                self.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+
     def update(self, dt):
         """在主循环中调用，处理连续移动"""
         # 检查 Shift 键状态

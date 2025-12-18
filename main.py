@@ -84,7 +84,7 @@ def main():
     # --- GLFW 和渲染设置 ---
     if not glfw.init():
         raise Exception("初始化GLFW失败")
-    window = glfw.create_window(1200, 900, "Franka Emika Panda", None, None)
+    window = glfw.create_window(1800, 900, "Franka Emika Panda", None, None)
     if not window:
         glfw.terminate()
         raise Exception("创建GLFW窗口失败")
@@ -119,6 +119,16 @@ def main():
     context = mujoco.MjrContext(model, mujoco.mjtFontScale.mjFONTSCALE_150)
     mujoco.mjv_defaultFreeCamera(model, cam)
 
+    # 初始化第二个相机 (用于右侧固定视角)
+    cam2 = mujoco.MjvCamera()
+    cam2.type = mujoco.mjtCamera.mjCAMERA_FIXED
+    cam2.fixedcamid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "overview")
+
+    # 初始化第三个相机 (用于手眼视角)
+    cam3 = mujoco.MjvCamera()
+    cam3.type = mujoco.mjtCamera.mjCAMERA_FIXED
+    cam3.fixedcamid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "hand_camera")
+
     # 定义一个相对于初始位置的可达工作空间
     POS_LIMITS = np.array([[-0.5, 0.5], [-0.5, 0.5], [-0.6, 0.5]])  # x, y, z的相对范围
     abs_pos_limits = POS_LIMITS + initial_pos[:, np.newaxis]
@@ -141,6 +151,7 @@ def main():
     print("  鼠标滚轮: 缩放视角")
     print("  Z / X: 闭合/张开 夹爪")
     print("  R: 重置仿真并随机化方块位置")
+    print("  V: 切换左侧相机视角 (自由/固定)")
     print("  按住 Shift: 加快移动/开合速度")
     print("  任务: 将方块移动到地板上的红色圆形区域")
     print("目标点已被限制在安全工作区域内。")
@@ -176,14 +187,29 @@ def main():
                 data.qpos[8] = gripper_target
 
         mujoco.mj_step(model, data)
-        viewport = mujoco.MjrRect(0, 0, *glfw.get_framebuffer_size(window))
+        
+        # --- 分屏渲染 ---
+        width, height = glfw.get_framebuffer_size(window)
+        
+        # 1. 左侧视图 (主相机)
+        viewport1 = mujoco.MjrRect(0, 0, width // 3, height)
         mujoco.mjv_updateScene(model, data, opt, pert, cam, mujoco.mjtCatBit.mjCAT_ALL, scene)
+        mujoco.mjr_render(viewport1, scene, context)
+
+        # 2. 中间视图 (全局概览)
+        viewport2 = mujoco.MjrRect(width // 3, 0, width // 3, height)
+        mujoco.mjv_updateScene(model, data, opt, pert, cam2, mujoco.mjtCatBit.mjCAT_ALL, scene)
+        mujoco.mjr_render(viewport2, scene, context)
+
+        # 3. 右侧视图 (手眼相机)
+        viewport3 = mujoco.MjrRect(2 * (width // 3), 0, width - 2 * (width // 3), height)
+        mujoco.mjv_updateScene(model, data, opt, pert, cam3, mujoco.mjtCatBit.mjCAT_ALL, scene)
+        mujoco.mjr_render(viewport3, scene, context)
 
         # 计算方块与目标区域的重合面积，如果完全重合则重置
         if task.check_completion(model, data):
             task.reset(model, data, start_qpos, configuration, initial_pos, input_listener)
 
-        mujoco.mjr_render(viewport, scene, context)
         glfw.swap_buffers(window)
         glfw.poll_events()
         rate.sleep()

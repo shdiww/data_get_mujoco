@@ -28,9 +28,11 @@
   <worldbody>
     <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane" contype="1"/>
+    <!-- 添加一个固定视角的相机，名为 "overview"，看向机器人基座 -->
+    <camera name="overview" pos="1.6 0 1.2" mode="targetbody" target="link0"/>
 
   <body name="target" pos="0.5 0 0.3" quat="0 1 0 0" mocap="true">
-      <geom type="box" size=".05 .05 .05" contype="0" conaffinity="0" rgba=".6 .3 .3 .2"/>
+      <geom type="box" size=".05 .05 .05" contype="0" conaffinity="0" rgba=".6 .3 .3 0"/>
     </body>
     
     <body name="red_box" pos="0.4 0 0.02">
