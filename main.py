@@ -96,6 +96,9 @@ def main():
         if jnt_id != -1:
             q_addr = model.jnt_qposadr[jnt_id]
             data.qpos[q_addr:q_addr+7] = model.qpos0[q_addr:q_addr+7]
+            # 随机化位置: 在 X/Y 平面上添加随机偏移 (+/- 15cm)
+            data.qpos[q_addr] += np.random.uniform(-0.15, 0.15)
+            data.qpos[q_addr+1] += np.random.uniform(-0.15, 0.15)
 
     configuration.update(data.qpos)
     posture_task.set_target_from_configuration(configuration)
@@ -144,6 +147,21 @@ def main():
             # 夹爪控制: Z 闭合, X 张开
             if key == glfw.KEY_Z: gripper_target -= GRIPPER_STEP * step_mult
             elif key == glfw.KEY_X: gripper_target += GRIPPER_STEP * step_mult
+            
+            # R 键重置仿真并重新随机化方块
+            elif key == glfw.KEY_R:
+                mujoco.mj_resetDataKeyframe(model, data, model.key("home").id)
+                if box_id != -1:
+                    jnt_id = model.body_jntadr[box_id]
+                    if jnt_id != -1:
+                        q_addr = model.jnt_qposadr[jnt_id]
+                        data.qpos[q_addr:q_addr+7] = model.qpos0[q_addr:q_addr+7]
+                        data.qpos[q_addr] += np.random.uniform(-0.15, 0.15)
+                        data.qpos[q_addr+1] += np.random.uniform(-0.15, 0.15)
+                mujoco.mj_forward(model, data)
+                mink.move_mocap_to_frame(model, data, "target", "attachment_site", "site")
+                gripper_target = 0.04
+
             gripper_target = np.clip(gripper_target, 0.0, 0.04)
 
             np.clip(
@@ -193,6 +211,7 @@ def main():
     print("  鼠标右键拖动: 平移视角")
     print("  鼠标滚轮: 缩放视角")
     print("  Z / X: 闭合/张开 夹爪")
+    print("  R: 重置仿真并随机化方块位置")
     print("  按住 Shift: 加快移动/开合速度")
     print("目标点已被限制在安全工作区域内。")
     print("---\n")
