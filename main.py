@@ -109,8 +109,11 @@ def main():
     POS_LIMITS = np.array([[-0.4, 0.4], [-0.4, 0.4], [-0.3, 0.5]])  # x, y, z的相对范围
     abs_pos_limits = POS_LIMITS + initial_pos[:, np.newaxis]
 
+    gripper_closed = False
+
     def keyboard(window, key, scancode, act, mods):
         """键盘回调函数: 控制mocap目标的位置"""
+        nonlocal gripper_closed
         if act == glfw.PRESS or act == glfw.REPEAT:
             if key == glfw.KEY_W: data.mocap_pos[0, 0] += KEY_STEP
             elif key == glfw.KEY_S: data.mocap_pos[0, 0] -= KEY_STEP
@@ -124,6 +127,8 @@ def main():
                 abs_pos_limits[:, 1],
                 out=data.mocap_pos[0],
             )
+        if key == glfw.KEY_SPACE and act == glfw.PRESS:
+            gripper_closed = not gripper_closed
 
     def mouse_button(window, button, act, mods):
         """鼠标按键回调函数: 记录按键状态"""
@@ -164,6 +169,7 @@ def main():
     print("  鼠标左键拖动: 旋转视角")
     print("  鼠标右键拖动: 平移视角")
     print("  鼠标滚轮: 缩放视角")
+    print("  空格键 (Space): 开合夹爪")
     print("目标点已被限制在安全工作区域内。")
     print("---\n")
 
@@ -172,7 +178,23 @@ def main():
         T_wt = mink.SE3.from_mocap_name(model, data, "target")
         end_effector_task.set_target(T_wt)
         converge_ik(configuration, tasks, dt, SOLVER, POS_THRESHOLD, ORI_THRESHOLD, MAX_ITERS)
-        data.ctrl = configuration.q[:8]
+
+        # 夹爪控制: 覆盖IK计算出的夹爪关节角度
+        gripper_target = 0.0 if gripper_closed else 0.04
+        configuration.q[7] = gripper_target
+        if configuration.q.shape[0] > 8:
+            configuration.q[8] = gripper_target
+
+        # 安全地将关节位置应用到控制信号
+        # 使用 model.nu (致动器数量) 来避免数组形状不匹配的错误
+        ctrl_idx = min(model.nu, configuration.q.shape[0])
+        data.ctrl[:ctrl_idx] = configuration.q[:ctrl_idx]
+
+        # 如果致动器不足以控制夹爪(例如只有7个手臂致动器)，则直接设置夹爪关节位置
+        if model.nu < 9 and configuration.q.shape[0] > 8:
+            data.qpos[7] = gripper_target
+            data.qpos[8] = gripper_target
+
         mujoco.mj_step(model, data)
         viewport = mujoco.MjrRect(0, 0, *glfw.get_framebuffer_size(window))
         mujoco.mjv_updateScene(model, data, opt, pert, cam, mujoco.mjtCatBit.mjCAT_ALL, scene)
