@@ -8,6 +8,7 @@ from loop_rate_limiters import RateLimiter
 import mink
 
 from keyboard import InputListener
+from task import PickAndPlaceTask
 
 _HERE = Path(__file__).parent
 _XML = _HERE / "model/franka_emika_panda/mjx_scene.xml"
@@ -59,6 +60,9 @@ def main():
     # 加载MuJoCo模型和数据
     model = mujoco.MjModel.from_xml_path(_XML.as_posix())
     data = mujoco.MjData(model)
+    
+    # 初始化任务环境 (自动获取相关ID)
+    task = PickAndPlaceTask(model)
 
     # 创建一个Mink机器人构型对象
     configuration = mink.Configuration(model)
@@ -88,25 +92,24 @@ def main():
     glfw.swap_interval(1)  # 开启垂直同步
 
     # --- 仿真和mocap(运动捕捉)目标初始化 ---
+    # 直接重置到 "home" 关键帧，该关键帧现在是我们的低位起始姿态
     mujoco.mj_resetDataKeyframe(model, data, model.key("home").id)
+    start_qpos = data.qpos.copy()  # 保存初始姿态
 
-    # 修复: "home" 关键帧不包含红色方块的信息，重置时会将方块位置归零(跑到底座下)。
-    # 这里我们手动将方块的状态恢复为 XML 中定义的初始值 (model.qpos0)。
-    box_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "red_box")
-    if box_id != -1:
-        jnt_id = model.body_jntadr[box_id]
-        if jnt_id != -1:
-            q_addr = model.jnt_qposadr[jnt_id]
-            data.qpos[q_addr:q_addr+7] = model.qpos0[q_addr:q_addr+7]
-            # 随机化位置: 在 X/Y 平面上添加随机偏移 (+/- 15cm)
-            data.qpos[q_addr] += np.random.uniform(-0.15, 0.15)
-            data.qpos[q_addr+1] += np.random.uniform(-0.15, 0.15)
+    # 随机化方块位置
+    task.randomize_box(model, data)
 
-    configuration.update(data.qpos)
-    posture_task.set_target_from_configuration(configuration)
-    mujoco.mj_forward(model, data)  # 正向运动学，确保数据一致
+    # 更新正向运动学，以反映关节和方块位置的变化
+    mujoco.mj_forward(model, data)
+
+    # 将 mocap 目标 ("target") 移动到当前末端执行器的位置
+    # 这样可以确保控制开始时，目标和机械臂末端是对齐的，避免跳动
     mink.move_mocap_to_frame(model, data, "target", "attachment_site", "site")
     initial_pos = data.mocap_pos[0].copy()
+
+    # 更新IK求解器的状态
+    configuration.update(data.qpos)
+    posture_task.set_target_from_configuration(configuration)
 
     # --- 为交互定义回调函数和状态变量 ---
     cam = mujoco.MjvCamera()
@@ -120,17 +123,8 @@ def main():
     POS_LIMITS = np.array([[-0.5, 0.5], [-0.5, 0.5], [-0.6, 0.5]])  # x, y, z的相对范围
     abs_pos_limits = POS_LIMITS + initial_pos[:, np.newaxis]
 
-    # 定义放置目标区域 (红色半透明圆盘)
-    TARGET_ZONE_POS = np.array([0.5, -0.3, 0.001])
-    TARGET_ZONE_SIZE = np.array([0.08, 0.001, 0.0])  # 半径 0.08m, 高度极小
-    TARGET_ZONE_RGBA = np.array([1.0, 0.0, 0.0, 0.3])
-
     # 初始化输入监听器
-    input_listener = InputListener(model, data, scene, cam, box_id, abs_pos_limits)
-    
-    # 获取夹爪致动器的ID (如果存在)，以便精确控制
-    gripper_act1 = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "finger_joint1")
-    gripper_act2 = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "finger_joint2")
+    input_listener = InputListener(model, data, scene, cam, task.box_id, abs_pos_limits)
 
     glfw.set_key_callback(window, input_listener.keyboard)
     glfw.set_cursor_pos_callback(window, input_listener.mouse_move)
@@ -167,12 +161,12 @@ def main():
         # 将控制信号应用到致动器
         if model.nu > 0:
             # 1. 优先设置夹爪致动器 (如果存在)
-            if gripper_act1 != -1: data.ctrl[gripper_act1] = gripper_target
-            if gripper_act2 != -1: data.ctrl[gripper_act2] = gripper_target
+            if task.gripper_act1 != -1: data.ctrl[task.gripper_act1] = gripper_target
+            if task.gripper_act2 != -1: data.ctrl[task.gripper_act2] = gripper_target
             
             # 2. 设置手臂致动器 (假设非夹爪的致动器对应手臂关节)
             for i in range(model.nu):
-                if i != gripper_act1 and i != gripper_act2:
+                if i != task.gripper_act1 and i != task.gripper_act2:
                     data.ctrl[i] = configuration.q[i]
         else:
             # 如果没有任何致动器，回退到直接修改关节位置 (瞬移)
@@ -184,17 +178,9 @@ def main():
         viewport = mujoco.MjrRect(0, 0, *glfw.get_framebuffer_size(window))
         mujoco.mjv_updateScene(model, data, opt, pert, cam, mujoco.mjtCatBit.mjCAT_ALL, scene)
 
-        # 渲染放置目标区域
-        if scene.ngeom < scene.maxgeom:
-            mujoco.mjv_initGeom(
-                scene.geoms[scene.ngeom],
-                type=mujoco.mjtGeom.mjGEOM_CYLINDER,
-                size=TARGET_ZONE_SIZE,
-                pos=TARGET_ZONE_POS,
-                mat=np.eye(3).flatten(),
-                rgba=TARGET_ZONE_RGBA,
-            )
-            scene.ngeom += 1
+        # 计算方块与目标区域的重合面积，如果完全重合则重置
+        if task.check_completion(model, data):
+            task.reset(model, data, start_qpos, configuration, initial_pos, input_listener)
 
         mujoco.mjr_render(viewport, scene, context)
         glfw.swap_buffers(window)
