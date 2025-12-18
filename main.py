@@ -87,6 +87,16 @@ def main():
 
     # --- 仿真和mocap(运动捕捉)目标初始化 ---
     mujoco.mj_resetDataKeyframe(model, data, model.key("home").id)
+
+    # 修复: "home" 关键帧不包含红色方块的信息，重置时会将方块位置归零(跑到底座下)。
+    # 这里我们手动将方块的状态恢复为 XML 中定义的初始值 (model.qpos0)。
+    box_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "red_box")
+    if box_id != -1:
+        jnt_id = model.body_jntadr[box_id]
+        if jnt_id != -1:
+            q_addr = model.jnt_qposadr[jnt_id]
+            data.qpos[q_addr:q_addr+7] = model.qpos0[q_addr:q_addr+7]
+
     configuration.update(data.qpos)
     posture_task.set_target_from_configuration(configuration)
     mujoco.mj_forward(model, data)  # 正向运动学，确保数据一致
@@ -107,10 +117,14 @@ def main():
     GRIPPER_STEP = 0.002 # 夹爪控制步长
 
     # 定义一个相对于初始位置的可达工作空间
-    POS_LIMITS = np.array([[-0.4, 0.4], [-0.4, 0.4], [-0.3, 0.5]])  # x, y, z的相对范围
+    POS_LIMITS = np.array([[-0.5, 0.5], [-0.5, 0.5], [-0.6, 0.5]])  # x, y, z的相对范围
     abs_pos_limits = POS_LIMITS + initial_pos[:, np.newaxis]
 
     gripper_target = 0.04
+    
+    # 获取夹爪致动器的ID (如果存在)，以便精确控制
+    gripper_act1 = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "finger_joint1")
+    gripper_act2 = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "finger_joint2")
 
     def keyboard(window, key, scancode, act, mods):
         """键盘回调函数: 控制mocap目标的位置"""
@@ -194,15 +208,21 @@ def main():
         if configuration.q.shape[0] > 8:
             configuration.q[8] = gripper_target
 
-        # 安全地将关节位置应用到控制信号
-        # 使用 model.nu (致动器数量) 来避免数组形状不匹配的错误
-        ctrl_idx = min(model.nu, configuration.q.shape[0])
-        data.ctrl[:ctrl_idx] = configuration.q[:ctrl_idx]
-
-        # 如果致动器不足以控制夹爪(例如只有7个手臂致动器)，则直接设置夹爪关节位置
-        if model.nu < 9 and configuration.q.shape[0] > 8:
-            data.qpos[7] = gripper_target
-            data.qpos[8] = gripper_target
+        # 将控制信号应用到致动器
+        if model.nu > 0:
+            # 1. 优先设置夹爪致动器 (如果存在)
+            if gripper_act1 != -1: data.ctrl[gripper_act1] = gripper_target
+            if gripper_act2 != -1: data.ctrl[gripper_act2] = gripper_target
+            
+            # 2. 设置手臂致动器 (假设非夹爪的致动器对应手臂关节)
+            for i in range(model.nu):
+                if i != gripper_act1 and i != gripper_act2:
+                    data.ctrl[i] = configuration.q[i]
+        else:
+            # 如果没有任何致动器，回退到直接修改关节位置 (瞬移)
+            if configuration.q.shape[0] > 8:
+                data.qpos[7] = gripper_target
+                data.qpos[8] = gripper_target
 
         mujoco.mj_step(model, data)
         viewport = mujoco.MjrRect(0, 0, *glfw.get_framebuffer_size(window))
