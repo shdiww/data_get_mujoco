@@ -104,31 +104,40 @@ def main():
     button_left, button_middle, button_right = False, False, False
     lastx, lasty = 0, 0
     KEY_STEP = 0.001  # 键盘控制的步长 (米)
+    GRIPPER_STEP = 0.002 # 夹爪控制步长
 
     # 定义一个相对于初始位置的可达工作空间
     POS_LIMITS = np.array([[-0.4, 0.4], [-0.4, 0.4], [-0.3, 0.5]])  # x, y, z的相对范围
     abs_pos_limits = POS_LIMITS + initial_pos[:, np.newaxis]
 
-    gripper_closed = False
+    gripper_target = 0.04
 
     def keyboard(window, key, scancode, act, mods):
         """键盘回调函数: 控制mocap目标的位置"""
-        nonlocal gripper_closed
+        nonlocal gripper_target
+        
+        # 按住 Shift 键时步长增大 (大开合/快速移动)
+        step_mult = 5.0 if (mods & glfw.MOD_SHIFT) else 1.0
+
         if act == glfw.PRESS or act == glfw.REPEAT:
-            if key == glfw.KEY_W: data.mocap_pos[0, 0] += KEY_STEP
-            elif key == glfw.KEY_S: data.mocap_pos[0, 0] -= KEY_STEP
-            elif key == glfw.KEY_A: data.mocap_pos[0, 1] += KEY_STEP
-            elif key == glfw.KEY_D: data.mocap_pos[0, 1] -= KEY_STEP
-            elif key == glfw.KEY_Q: data.mocap_pos[0, 2] += KEY_STEP
-            elif key == glfw.KEY_E: data.mocap_pos[0, 2] -= KEY_STEP
+            if key == glfw.KEY_W: data.mocap_pos[0, 0] += KEY_STEP * step_mult
+            elif key == glfw.KEY_S: data.mocap_pos[0, 0] -= KEY_STEP * step_mult
+            elif key == glfw.KEY_A: data.mocap_pos[0, 1] += KEY_STEP * step_mult
+            elif key == glfw.KEY_D: data.mocap_pos[0, 1] -= KEY_STEP * step_mult
+            elif key == glfw.KEY_Q: data.mocap_pos[0, 2] += KEY_STEP * step_mult
+            elif key == glfw.KEY_E: data.mocap_pos[0, 2] -= KEY_STEP * step_mult
+            
+            # 夹爪控制: Z 闭合, X 张开
+            if key == glfw.KEY_Z: gripper_target -= GRIPPER_STEP * step_mult
+            elif key == glfw.KEY_X: gripper_target += GRIPPER_STEP * step_mult
+            gripper_target = np.clip(gripper_target, 0.0, 0.04)
+
             np.clip(
                 data.mocap_pos[0],
                 abs_pos_limits[:, 0],
                 abs_pos_limits[:, 1],
                 out=data.mocap_pos[0],
             )
-        if key == glfw.KEY_SPACE and act == glfw.PRESS:
-            gripper_closed = not gripper_closed
 
     def mouse_button(window, button, act, mods):
         """鼠标按键回调函数: 记录按键状态"""
@@ -169,7 +178,8 @@ def main():
     print("  鼠标左键拖动: 旋转视角")
     print("  鼠标右键拖动: 平移视角")
     print("  鼠标滚轮: 缩放视角")
-    print("  空格键 (Space): 开合夹爪")
+    print("  Z / X: 闭合/张开 夹爪")
+    print("  按住 Shift: 加快移动/开合速度")
     print("目标点已被限制在安全工作区域内。")
     print("---\n")
 
@@ -180,7 +190,6 @@ def main():
         converge_ik(configuration, tasks, dt, SOLVER, POS_THRESHOLD, ORI_THRESHOLD, MAX_ITERS)
 
         # 夹爪控制: 覆盖IK计算出的夹爪关节角度
-        gripper_target = 0.0 if gripper_closed else 0.04
         configuration.q[7] = gripper_target
         if configuration.q.shape[0] > 8:
             configuration.q[8] = gripper_target
