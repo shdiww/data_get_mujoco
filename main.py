@@ -148,6 +148,7 @@ def main():
 
     while not glfw.window_should_close(window):
         dt = rate.dt
+        input_listener.update(dt)
         T_wt = mink.SE3.from_mocap_name(model, data, "target")
         end_effector_task.set_target(T_wt)
         converge_ik(configuration, tasks, dt, SOLVER, POS_THRESHOLD, ORI_THRESHOLD, MAX_ITERS)
