@@ -7,6 +7,8 @@ from loop_rate_limiters import RateLimiter
 
 import mink
 
+from keyboard import InputListener
+
 _HERE = Path(__file__).parent
 _XML = _HERE / "model/franka_emika_panda/mjx_scene.xml"
 
@@ -114,93 +116,26 @@ def main():
     context = mujoco.MjrContext(model, mujoco.mjtFontScale.mjFONTSCALE_150)
     mujoco.mjv_defaultFreeCamera(model, cam)
 
-    button_left, button_middle, button_right = False, False, False
-    lastx, lasty = 0, 0
-    KEY_STEP = 0.001  # 键盘控制的步长 (米)
-    GRIPPER_STEP = 0.002 # 夹爪控制步长
-
     # 定义一个相对于初始位置的可达工作空间
     POS_LIMITS = np.array([[-0.5, 0.5], [-0.5, 0.5], [-0.6, 0.5]])  # x, y, z的相对范围
     abs_pos_limits = POS_LIMITS + initial_pos[:, np.newaxis]
 
-    gripper_target = 0.04
+    # 定义放置目标区域 (红色半透明圆盘)
+    TARGET_ZONE_POS = np.array([0.5, -0.3, 0.001])
+    TARGET_ZONE_SIZE = np.array([0.08, 0.001, 0.0])  # 半径 0.08m, 高度极小
+    TARGET_ZONE_RGBA = np.array([1.0, 0.0, 0.0, 0.3])
+
+    # 初始化输入监听器
+    input_listener = InputListener(model, data, scene, cam, box_id, abs_pos_limits)
     
     # 获取夹爪致动器的ID (如果存在)，以便精确控制
     gripper_act1 = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "finger_joint1")
     gripper_act2 = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, "finger_joint2")
 
-    def keyboard(window, key, scancode, act, mods):
-        """键盘回调函数: 控制mocap目标的位置"""
-        nonlocal gripper_target
-        
-        # 按住 Shift 键时步长增大 (大开合/快速移动)
-        step_mult = 5.0 if (mods & glfw.MOD_SHIFT) else 1.0
-
-        if act == glfw.PRESS or act == glfw.REPEAT:
-            if key == glfw.KEY_W: data.mocap_pos[0, 0] += KEY_STEP * step_mult
-            elif key == glfw.KEY_S: data.mocap_pos[0, 0] -= KEY_STEP * step_mult
-            elif key == glfw.KEY_A: data.mocap_pos[0, 1] += KEY_STEP * step_mult
-            elif key == glfw.KEY_D: data.mocap_pos[0, 1] -= KEY_STEP * step_mult
-            elif key == glfw.KEY_Q: data.mocap_pos[0, 2] += KEY_STEP * step_mult
-            elif key == glfw.KEY_E: data.mocap_pos[0, 2] -= KEY_STEP * step_mult
-            
-            # 夹爪控制: Z 闭合, X 张开
-            if key == glfw.KEY_Z: gripper_target -= GRIPPER_STEP * step_mult
-            elif key == glfw.KEY_X: gripper_target += GRIPPER_STEP * step_mult
-            
-            # R 键重置仿真并重新随机化方块
-            elif key == glfw.KEY_R:
-                mujoco.mj_resetDataKeyframe(model, data, model.key("home").id)
-                if box_id != -1:
-                    jnt_id = model.body_jntadr[box_id]
-                    if jnt_id != -1:
-                        q_addr = model.jnt_qposadr[jnt_id]
-                        data.qpos[q_addr:q_addr+7] = model.qpos0[q_addr:q_addr+7]
-                        data.qpos[q_addr] += np.random.uniform(-0.15, 0.15)
-                        data.qpos[q_addr+1] += np.random.uniform(-0.15, 0.15)
-                mujoco.mj_forward(model, data)
-                mink.move_mocap_to_frame(model, data, "target", "attachment_site", "site")
-                gripper_target = 0.04
-
-            gripper_target = np.clip(gripper_target, 0.0, 0.04)
-
-            np.clip(
-                data.mocap_pos[0],
-                abs_pos_limits[:, 0],
-                abs_pos_limits[:, 1],
-                out=data.mocap_pos[0],
-            )
-
-    def mouse_button(window, button, act, mods):
-        """鼠标按键回调函数: 记录按键状态"""
-        nonlocal button_left, button_middle, button_right, lastx, lasty
-        if button == glfw.MOUSE_BUTTON_LEFT: button_left = act == glfw.PRESS
-        elif button == glfw.MOUSE_BUTTON_MIDDLE: button_middle = act == glfw.PRESS
-        elif button == glfw.MOUSE_BUTTON_RIGHT: button_right = act == glfw.PRESS
-        lastx, lasty = glfw.get_cursor_pos(window)
-
-    def mouse_move(window, xpos, ypos):
-        """鼠标移动回调函数: 控制相机"""
-        nonlocal lastx, lasty
-        if not (button_left or button_right): return
-        dx, dy = xpos - lastx, ypos - lasty
-        lastx, lasty = xpos, ypos
-        width, height = glfw.get_window_size(window)
-        if button_left:
-            mujoco.mjv_moveCamera(model, mujoco.mjtMouse.mjMOUSE_ROTATE_H, dx / width, 0, scene, cam)
-            mujoco.mjv_moveCamera(model, mujoco.mjtMouse.mjMOUSE_ROTATE_V, 0, dy / height, scene, cam)
-        elif button_right:
-            mujoco.mjv_moveCamera(model, mujoco.mjtMouse.mjMOUSE_MOVE_H, dx / width, 0, scene, cam)
-            mujoco.mjv_moveCamera(model, mujoco.mjtMouse.mjMOUSE_MOVE_V, 0, dy / height, scene, cam)
-
-    def scroll(window, xoffset, yoffset):
-        """鼠标滚轮回调函数: 缩放相机"""
-        mujoco.mjv_moveCamera(model, mujoco.mjtMouse.mjMOUSE_ZOOM, 0, -0.05 * yoffset, scene, cam)
-
-    glfw.set_key_callback(window, keyboard)
-    glfw.set_cursor_pos_callback(window, mouse_move)
-    glfw.set_mouse_button_callback(window, mouse_button)
-    glfw.set_scroll_callback(window, scroll)
+    glfw.set_key_callback(window, input_listener.keyboard)
+    glfw.set_cursor_pos_callback(window, input_listener.mouse_move)
+    glfw.set_mouse_button_callback(window, input_listener.mouse_button)
+    glfw.set_scroll_callback(window, input_listener.scroll)
 
     # --- 主循环 ---
     rate = RateLimiter(frequency=200.0, warn=False)
@@ -213,6 +148,7 @@ def main():
     print("  Z / X: 闭合/张开 夹爪")
     print("  R: 重置仿真并随机化方块位置")
     print("  按住 Shift: 加快移动/开合速度")
+    print("  任务: 将方块移动到地板上的红色圆形区域")
     print("目标点已被限制在安全工作区域内。")
     print("---\n")
 
@@ -223,6 +159,7 @@ def main():
         converge_ik(configuration, tasks, dt, SOLVER, POS_THRESHOLD, ORI_THRESHOLD, MAX_ITERS)
 
         # 夹爪控制: 覆盖IK计算出的夹爪关节角度
+        gripper_target = input_listener.gripper_target
         configuration.q[7] = gripper_target
         if configuration.q.shape[0] > 8:
             configuration.q[8] = gripper_target
@@ -246,6 +183,19 @@ def main():
         mujoco.mj_step(model, data)
         viewport = mujoco.MjrRect(0, 0, *glfw.get_framebuffer_size(window))
         mujoco.mjv_updateScene(model, data, opt, pert, cam, mujoco.mjtCatBit.mjCAT_ALL, scene)
+
+        # 渲染放置目标区域
+        if scene.ngeom < scene.maxgeom:
+            mujoco.mjv_initGeom(
+                scene.geoms[scene.ngeom],
+                type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+                size=TARGET_ZONE_SIZE,
+                pos=TARGET_ZONE_POS,
+                mat=np.eye(3).flatten(),
+                rgba=TARGET_ZONE_RGBA,
+            )
+            scene.ngeom += 1
+
         mujoco.mjr_render(viewport, scene, context)
         glfw.swap_buffers(window)
         glfw.poll_events()
