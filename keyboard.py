@@ -21,12 +21,14 @@ class InputListener:
         self.lastx = 0
         self.lasty = 0
         self.key_states = {}
+        self.latched_keys = set()  # 用于记录当前帧内触发过的按键，防止短按丢失
         self.MOVE_SPEED = 0.2  # m/s
         self.GRIPPER_SPEED = 0.15  # m/s
 
     def keyboard(self, window, key, scancode, act, mods):
         if act == glfw.PRESS:
             self.key_states[key] = True
+            self.latched_keys.add(key)
         elif act == glfw.RELEASE:
             self.key_states[key] = False
 
@@ -44,16 +46,6 @@ class InputListener:
             mink.move_mocap_to_frame(self.model, self.data, "target", "attachment_site", "site")
             self.gripper_target = 0.04
 
-        # 切换相机视角 (V键)
-        if act == glfw.PRESS and key == glfw.KEY_V:
-            if self.cam.type == mujoco.mjtCamera.mjCAMERA_FREE:
-                cam_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, "overview")
-                if cam_id != -1:
-                    self.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
-                    self.cam.fixedcamid = cam_id
-            else:
-                self.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-
     def update(self, dt):
         """在主循环中调用，处理连续移动"""
         # 检查 Shift 键状态
@@ -64,29 +56,40 @@ class InputListener:
         move_step = self.MOVE_SPEED * multiplier * dt
         gripper_step = self.GRIPPER_SPEED * multiplier * dt
 
-        # 移动控制 (支持同时按键)
-        if self.key_states.get(glfw.KEY_W, False):
-            self.data.mocap_pos[0, 0] += move_step
-        if self.key_states.get(glfw.KEY_S, False):
-            self.data.mocap_pos[0, 0] -= move_step
-        if self.key_states.get(glfw.KEY_A, False):
-            self.data.mocap_pos[0, 1] += move_step
-        if self.key_states.get(glfw.KEY_D, False):
-            self.data.mocap_pos[0, 1] -= move_step
-        if self.key_states.get(glfw.KEY_Q, False):
-            self.data.mocap_pos[0, 2] += move_step
-        if self.key_states.get(glfw.KEY_E, False):
-            self.data.mocap_pos[0, 2] -= move_step
+        # 移动控制 (支持同时按键，并归一化速度向量，优化点按体验)
+        move_vec = np.zeros(3)
+        
+        def get_weight(key):
+            if self.key_states.get(key, False):
+                return 1.0
+            elif key in self.latched_keys:
+                return 0.4  # 点按(未长按)时给予较小的权重，避免突变
+            return 0.0
+
+        move_vec[0] += get_weight(glfw.KEY_W)
+        move_vec[0] -= get_weight(glfw.KEY_S)
+        move_vec[1] += get_weight(glfw.KEY_A)
+        move_vec[1] -= get_weight(glfw.KEY_D)
+        move_vec[2] += get_weight(glfw.KEY_Q)
+        move_vec[2] -= get_weight(glfw.KEY_E)
+
+        norm = np.linalg.norm(move_vec)
+        if norm > 0:
+            # 如果合力大于1 (例如同时按W和A)，归一化到1
+            # 如果合力小于1 (例如只点按W)，保持原大小，从而实现微动
+            scale = 1.0 / norm if norm > 1.0 else 1.0
+            self.data.mocap_pos[0] += move_vec * scale * move_step
 
         # 夹爪控制
-        if self.key_states.get(glfw.KEY_Z, False):
-            self.gripper_target -= gripper_step
-        if self.key_states.get(glfw.KEY_X, False):
-            self.gripper_target += gripper_step
+        self.gripper_target -= get_weight(glfw.KEY_Z) * gripper_step
+        self.gripper_target += get_weight(glfw.KEY_X) * gripper_step
 
         # 限制范围
         self.gripper_target = np.clip(self.gripper_target, 0.0, 0.04)
         np.clip(self.data.mocap_pos[0], self.abs_pos_limits[:, 0], self.abs_pos_limits[:, 1], out=self.data.mocap_pos[0])
+
+        # 清除本帧的锁存按键
+        self.latched_keys.clear()
 
     def mouse_button(self, window, button, act, mods):
         if button == glfw.MOUSE_BUTTON_LEFT: self.button_left = act == glfw.PRESS
