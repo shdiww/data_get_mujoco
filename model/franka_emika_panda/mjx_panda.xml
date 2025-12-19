@@ -210,7 +210,7 @@
                     <body name="hand" pos="0 0 0.107" quat="0.9238795 0 0 -0.3826834">
                       <inertial mass="0.73" pos="-0.01 0 0.03" diaginertia="0.001 0.0025 0.0017"/>
                       <!-- 添加手眼相机: 位于手掌中心，调整旋转以获得水平视角 (看向指尖) -->
-                      <camera name="hand_camera" pos="0 0 0" mode="fixed" quat="0 0.7071 0.7071 0" fovy="90"/>
+                      <camera name="hand_camera" pos="0.01 0 0.06" mode="fixed" quat="0 0.7071 0.7071 0" fovy="90"/>
                       <geom mesh="hand_0" material="off_white" class="visual"/>
                       <geom mesh="hand_1" material="black" class="visual"/>
                       <geom mesh="hand_2" material="black" class="visual"/>
@@ -220,8 +220,8 @@
                       <geom name="hand_capsule" type="capsule"
                        class="collision" conaffinity="1" size="0.04 0.06"
                        quat="1 1 0 0" pos="0 0 0.03"/>
-                      <site name="gripper" pos="0 0 0.1"/>
-                      <site pos="0 0 0.09" name="attachment_site"/>
+                      <site name="gripper" pos="0 0 0.1" rgba="0 0 0 0"/>
+                      <site pos="0 0 0.09" name="attachment_site" rgba="0 0 0 0"/>
                       <body name="left_finger" pos="0 0 0.0584">
                         <inertial mass="0.015" pos="0 0 0" diaginertia="2.375e-6 2.375e-6 7.5e-7"/>
                         <joint name="finger_joint1" class="finger" damping="10"/>
