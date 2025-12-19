@@ -152,9 +152,15 @@ def main():
     print("  Z / X: 闭合/张开 夹爪")
     print("  R: 重置仿真并随机化方块位置")
     print("  按住 Shift: 加快移动/开合速度")
+    print("---\n")
+    print("控制说明 (手柄):")
+    print("左摇杆: 前后左右移动 (XY轴)")
+    print("右摇杆 (上下): 上下移动 (Z轴)")
+    print("*   **A 键**: 闭合夹爪")
+    print("*   **B 键**: 张开夹爪")
+    print("*   **Start 键**: 重置仿真")
     print("  任务: 将方块移动到地板上的红色圆形区域")
     print("目标点已被限制在安全工作区域内。")
-    print("---\n")
 
     while not glfw.window_should_close(window):
         dt = rate.dt
