@@ -25,9 +25,10 @@ def main():
 
     print(f"正在加载数据集 {dataset_path} ...")
     root = zarr.open(dataset_path, mode='r')
-    states = root['state'][:]
-    actions = root['action'][:]
-    print(f"加载了 {len(states)} 帧数据。")
+    all_states = root['data']['state']
+    all_actions = root['data']['action']
+    episode_ends = root['meta']['episode_ends'][:]
+    print(f"加载了 {len(episode_ends)} 条轨迹，共 {len(all_states)} 帧数据。")
 
     # 加载MuJoCo模型
     model = mujoco.MjModel.from_xml_path(_XML.as_posix())
@@ -55,15 +56,6 @@ def main():
     glfw.make_context_current(window)
     glfw.swap_interval(1)
 
-    # --- 初始化状态 ---
-    # 使用录制的第一帧状态初始化 (包含机器人和方块位置)
-    data.qpos[:] = states[0]
-    mujoco.mj_forward(model, data)
-    
-    # 同步IK配置
-    configuration.update(data.qpos)
-    posture_task.set_target_from_configuration(configuration)
-
     # 渲染设置
     cam = mujoco.MjvCamera()
     opt = mujoco.MjvOption()
@@ -83,49 +75,65 @@ def main():
     
     print("\n--- 开始回放 ---")
     
-    for i in range(len(actions)):
-        if glfw.window_should_close(window):
-            break
+    start_idx = 0
+    for ep_idx, end_idx in enumerate(episode_ends):
+        print(f"Replaying Episode {ep_idx}...")
+        states = all_states[start_idx:end_idx]
+        actions = all_actions[start_idx:end_idx]
+        start_idx = end_idx
         
-        dt = rate.dt
+        # --- 初始化状态 ---
+        # 使用录制的第一帧状态初始化
+        data.qpos[:] = states[0]
+        mujoco.mj_forward(model, data)
+        
+        # 同步IK配置
+        configuration.update(data.qpos)
+        posture_task.set_target_from_configuration(configuration)
 
-        # 1. 读取 Action
-        action = actions[i]
-        target_pos = action[:3]
-        target_quat = action[3:7]
-        gripper_target = action[7]
+        for i in range(len(actions)):
+            if glfw.window_should_close(window):
+                break
+            
+            dt = rate.dt
 
-        # 2. 设置目标 (Action Application)
-        data.mocap_pos[0] = target_pos
-        data.mocap_quat[0] = target_quat
+            # 1. 读取 Action
+            action = actions[i]
+            target_pos = action[:3]
+            target_quat = action[3:7]
+            gripper_target = action[7]
 
-        # 3. 执行控制 (IK + Step)
-        T_wt = mink.SE3.from_mocap_name(model, data, "target")
-        end_effector_task.set_target(T_wt)
-        converge_ik(configuration, tasks, dt, SOLVER, POS_THRESHOLD, ORI_THRESHOLD, MAX_ITERS)
+            # 2. 设置目标 (Action Application)
+            data.mocap_pos[0] = target_pos
+            data.mocap_quat[0] = target_quat
 
-        # 应用夹爪
-        configuration.q[7] = gripper_target
-        if configuration.q.shape[0] > 8:
-            configuration.q[8] = gripper_target
+            # 3. 执行控制 (IK + Step)
+            T_wt = mink.SE3.from_mocap_name(model, data, "target")
+            end_effector_task.set_target(T_wt)
+            converge_ik(configuration, tasks, dt, SOLVER, POS_THRESHOLD, ORI_THRESHOLD, MAX_ITERS)
 
-        if model.nu > 0:
-            if task.gripper_act1 != -1: data.ctrl[task.gripper_act1] = gripper_target
-            if task.gripper_act2 != -1: data.ctrl[task.gripper_act2] = gripper_target
-            for j in range(model.nu):
-                if j != task.gripper_act1 and j != task.gripper_act2:
-                    data.ctrl[j] = configuration.q[j]
+            # 应用夹爪
+            configuration.q[7] = gripper_target
+            if configuration.q.shape[0] > 8:
+                configuration.q[8] = gripper_target
 
-        mujoco.mj_step(model, data)
+            if model.nu > 0:
+                if task.gripper_act1 != -1: data.ctrl[task.gripper_act1] = gripper_target
+                if task.gripper_act2 != -1: data.ctrl[task.gripper_act2] = gripper_target
+                for j in range(model.nu):
+                    if j != task.gripper_act1 and j != task.gripper_act2:
+                        data.ctrl[j] = configuration.q[j]
 
-        # 渲染
-        viewport = mujoco.MjrRect(0, 0, *glfw.get_framebuffer_size(window))
-        mujoco.mjv_updateScene(model, data, opt, pert, cam, mujoco.mjtCatBit.mjCAT_ALL, scene)
-        mujoco.mjr_render(viewport, scene, context)
+            mujoco.mj_step(model, data)
 
-        glfw.swap_buffers(window)
-        glfw.poll_events()
-        rate.sleep()
+            # 渲染
+            viewport = mujoco.MjrRect(0, 0, *glfw.get_framebuffer_size(window))
+            mujoco.mjv_updateScene(model, data, opt, pert, cam, mujoco.mjtCatBit.mjCAT_ALL, scene)
+            mujoco.mjr_render(viewport, scene, context)
+
+            glfw.swap_buffers(window)
+            glfw.poll_events()
+            rate.sleep()
 
     print("回放结束。")
     glfw.terminate()

@@ -2,204 +2,201 @@ from pathlib import Path
 import argparse
 
 import glfw
-import mujoco
+import click
 import numpy as np
 import zarr
 from loop_rate_limiters import RateLimiter
+from mujoco_env import MujocoEnv
 
-import mink
-
-from keyboard import InputListener
-from task import PickAndPlaceTask
-from main import converge_ik, _XML, SOLVER, POS_THRESHOLD, ORI_THRESHOLD, MAX_ITERS
-
-def save_dataset(states, actions, filename="episode.zarr", episode_idx=0):
-    """保存数据到 Zarr 文件 (Group format)"""
-    print(f"Saving episode {episode_idx} with {len(states)} frames to {filename}...")
-    mode = 'a' if Path(filename).exists() else 'w'
-    root = zarr.open(filename, mode=mode)
+def save_episode_to_zarr(dataset_path, states, actions, chunk_size=2000):
+    """Appends a new episode to the Zarr dataset in ReplayBuffer format."""
+    # 将新的 episode 追加到 Zarr 数据集中，采用 ReplayBuffer 格式
+    print(f"Saving episode with {len(states)} frames to {dataset_path}...")
+    mode = 'a' if Path(dataset_path).exists() else 'w'
+    root = zarr.open(dataset_path, mode=mode)
     
-    for key in ['action', 'state']:
-        if key not in root:
-            root.create_group(key)
-            
-    key_name = f"chunk_{episode_idx}"
-    root['action'].create_dataset(key_name, data=np.array(actions), chunks=False, overwrite=True)
-    root['state'].create_dataset(key_name, data=np.array(states), chunks=False, overwrite=True)
-    print(f"Saved episode {episode_idx} to action/{key_name} and state/{key_name}.")
+    if 'data' not in root:
+        root.create_group('data')
+    if 'meta' not in root:
+        root.create_group('meta')
+        
+    data_group = root['data']
+    meta_group = root['meta']
+    
+    states_arr = np.array(states)
+    actions_arr = np.array(actions)
+    
+    # Append to action
+    # 追加 action 数据
+    if 'action' not in data_group:
+        # 如果是第一次创建，设置 chunk 大小
+        data_group.create_dataset('action', data=actions_arr, chunks=(chunk_size, actions_arr.shape[1]))
+    else:
+        # 否则直接追加
+        data_group['action'].append(actions_arr)
+        
+    # Append to state
+    # 追加 state 数据
+    if 'state' not in data_group:
+        data_group.create_dataset('state', data=states_arr, chunks=(chunk_size, states_arr.shape[1]))
+    else:
+        data_group['state'].append(states_arr)
+        
+    # Update episode_ends
+    # 更新 episode_ends 元数据，记录当前 episode 结束的索引位置
+    end_idx = data_group['action'].shape[0]
+    if 'episode_ends' not in meta_group:
+        meta_group.create_dataset('episode_ends', data=np.array([end_idx]), chunks=(100,))
+    else:
+        meta_group['episode_ends'].append(np.array([end_idx]))
+        
+    print(f"Saved. Total frames in dataset: {end_idx}")
+    
+    # 重新读取验证，确保用户能看到确切的 Episode 数量变化
+    root_check = zarr.open(dataset_path, mode='r')
+    print(f"✅ 验证成功: 数据集当前共包含 {len(root_check['meta']['episode_ends'])} 条 Episode。")
+
+def drop_last_episode_from_zarr(dataset_path):
+    """Removes the last recorded episode from the Zarr dataset."""
+    # 从 Zarr 数据集中删除最后录制的 episode
+    if not Path(dataset_path).exists():
+        print("Dataset does not exist.")
+        return
+    
+    root = zarr.open(dataset_path, mode='a')
+    if 'meta' not in root or 'episode_ends' not in root['meta'] or len(root['meta']['episode_ends']) == 0:
+        print("No episodes to drop.")
+        return
+        
+    episode_ends = root['meta']['episode_ends']
+    end_curr = episode_ends[-1]
+    # 获取倒数第二个 episode 的结束位置，如果只有一个则为 0
+    end_prev = episode_ends[-2] if len(episode_ends) > 1 else 0
+    
+    # Resize data arrays
+    # 调整数据数组的大小，截断到上一个 episode 的结束位置
+    root['data']['action'].resize(end_prev, root['data']['action'].shape[1])
+    root['data']['state'].resize(end_prev, root['data']['state'].shape[1])
+    
+    # Resize meta
+    # 调整元数据数组大小
+    root['meta']['episode_ends'].resize(len(episode_ends) - 1)
+    print(f"Dropped last episode. New total frames: {end_prev}")
 
 def main():
     parser = argparse.ArgumentParser(description="Record Mujoco episode to Zarr")
     parser.add_argument("--dataset_path", type=str, default="episode.zarr", help="Output path for the zarr dataset")
+    parser.add_argument("--chunk_size", type=int, default=2000, help="Zarr chunk size (frames)")
     args = parser.parse_args()
 
-    # 加载MuJoCo模型和数据
-    model = mujoco.MjModel.from_xml_path(_XML.as_posix())
-    data = mujoco.MjData(model)
-    
-    task = PickAndPlaceTask(model)
-    configuration = mink.Configuration(model)
-
-    end_effector_task = mink.FrameTask(
-        frame_name="attachment_site",
-        frame_type="site",
-        position_cost=1.0,
-        orientation_cost=1.0,
-        lm_damping=1.0,
-    )
-    posture_task = mink.PostureTask(model=model, cost=1e-2)
-    tasks = [end_effector_task, posture_task]
-
-    if not glfw.init():
-        raise Exception("初始化GLFW失败")
-    window = glfw.create_window(1800, 900, "Record Episode", None, None)
-    if not window:
-        glfw.terminate()
-        raise Exception("创建GLFW窗口失败")
-    glfw.make_context_current(window)
-    glfw.swap_interval(1)
-
-    mujoco.mj_resetDataKeyframe(model, data, model.key("home").id)
-    task.randomize_box(model, data)
-    mujoco.mj_forward(model, data)
-
-    mink.move_mocap_to_frame(model, data, "target", "attachment_site", "site")
-    initial_pos = data.mocap_pos[0].copy()
-
-    configuration.update(data.qpos)
-    posture_task.set_target_from_configuration(configuration)
-
-    cam = mujoco.MjvCamera()
-    opt = mujoco.MjvOption()
-    pert = mujoco.MjvPerturb()
-    scene = mujoco.MjvScene(model, maxgeom=10000)
-    context = mujoco.MjrContext(model, mujoco.mjtFontScale.mjFONTSCALE_150)
-    mujoco.mjv_defaultFreeCamera(model, cam)
-
-    # 初始化第二个相机 (用于右侧固定视角)
-    cam2 = mujoco.MjvCamera()
-    cam2.type = mujoco.mjtCamera.mjCAMERA_FIXED
-    cam2.fixedcamid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "overview")
-
-    # 初始化第三个相机 (用于手眼视角)
-    cam3 = mujoco.MjvCamera()
-    cam3.type = mujoco.mjtCamera.mjCAMERA_FIXED
-    cam3.fixedcamid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "hand_camera")
-
-    POS_LIMITS = np.array([[-0.5, 0.5], [-0.5, 0.5], [-0.6, 0.5]])
-    abs_pos_limits = POS_LIMITS + initial_pos[:, np.newaxis]
-
-    input_listener = InputListener(model, data, scene, cam, task.box_id, abs_pos_limits)
-
-    glfw.set_key_callback(window, input_listener.keyboard)
-    glfw.set_cursor_pos_callback(window, input_listener.mouse_move)
-    glfw.set_mouse_button_callback(window, input_listener.mouse_button)
-    glfw.set_scroll_callback(window, input_listener.scroll)
+    # 初始化环境
+    env = MujocoEnv()
 
     rate = RateLimiter(frequency=200.0, warn=False)
     
-    # 确定起始 episode_idx
-    episode_idx = 0
+    # State variables
+    # 状态变量
+    is_recording = False
+    manual_save_trigger = False
+    episode_states = []
+    episode_actions = []
+    episode_count = 0
+    
+    # Check existing episodes
+    # 检查已存在的 episode 数量
     if Path(args.dataset_path).exists():
         try:
             root = zarr.open(args.dataset_path, mode='r')
-            if 'action' in root:
-                indices = []
-                for k in root['action'].keys():
-                    if k.startswith('chunk_'):
-                        try:
-                            indices.append(int(k.split('_')[1]))
-                        except ValueError:
-                            continue
-                if indices:
-                    episode_idx = max(indices) + 1
+            if 'meta' in root and 'episode_ends' in root['meta']:
+                episode_count = len(root['meta']['episode_ends'])
         except Exception:
             pass
-    print(f"Next episode index: {episode_idx}")
-
-    # 数据缓冲区
-    episode_states = []
-    episode_actions = []
-    prev_time = data.time
+    print(f"Found {episode_count} existing episodes in {args.dataset_path}")
+    print(f"New episodes will be appended. Delete the file to start fresh.")
 
     print("\n--- 开始录制 ---")
-    print("操作完成后会自动保存并退出。")
-    print("按 R 重置 (会清空当前录制缓冲区)")
+    print(" [C] 开始录制 (Start Recording)")
+    print(" [Backspace] 删除上一条 (Drop Episode)")
+    print(" [T] 手动触发保存并重置 (Trigger Save & Reset)")
+    print(" [Q] 退出 (Quit)")
     print("----------------\n")
 
-    while not glfw.window_should_close(window):
+    # Custom key callback to handle recording logic
+    # 自定义按键回调处理录制逻辑
+    def on_key(window, key, scancode, action, mods):
+        nonlocal is_recording, episode_states, episode_actions, episode_count, manual_save_trigger
+        
+        # Pass to original listener for robot control
+        # 传递给原始监听器以控制机器人
+        env.input_listener.keyboard(window, key, scancode, action, mods)
+        
+        if action == glfw.PRESS:
+            if key == glfw.KEY_C:
+                # 按 C 开始录制
+                if not is_recording:
+                    is_recording = True
+                    episode_states = []
+                    episode_actions = []
+                    print("Recording started!")
+            elif key == glfw.KEY_T:
+                # 按 T 手动触发保存
+                if is_recording:
+                    manual_save_trigger = True
+                    print("Manual save triggered!")
+            elif key == glfw.KEY_BACKSPACE:
+                # 按 Backspace 删除上一条或取消当前录制
+                if is_recording:
+                    is_recording = False
+                    episode_states = []
+                    episode_actions = []
+                    print("Recording cancelled.")
+                else:
+                    if click.confirm('Are you sure to drop the last episode?'):
+                        drop_last_episode_from_zarr(args.dataset_path)
+                        episode_count = max(0, episode_count - 1)
+            elif key == glfw.KEY_Q:
+                # 按 Q 退出
+                glfw.set_window_should_close(window, True)
+
+    glfw.set_key_callback(env.window, on_key)
+
+    while not glfw.window_should_close(env.window):
         dt = rate.dt
 
-        # 检测是否发生了重置 (通过时间回跳判断)
-        if data.time < prev_time:
+        # 自动检测任务完成并重置
+        if is_recording and (env.check_completion() or manual_save_trigger):
+            # 增加最小帧数限制 (例如 100 帧)，防止重置后因状态未完全清除导致的连击
+            if len(episode_states) > 100:
+                print(f"Task completed! Saving episode {episode_count}...")
+                save_episode_to_zarr(args.dataset_path, episode_states, episode_actions, chunk_size=args.chunk_size)
+                episode_count += 1
+            else:
+                print(f"Discarding short episode ({len(episode_states)} frames) - likely reset artifact.")
+            
             episode_states = []
             episode_actions = []
-            print("检测到重置，缓冲区已清空。")
-        prev_time = data.time
+            manual_save_trigger = False
+            env.reset()
 
         # 1. 记录当前状态 (State) - 在应用动作之前
-        # state: 完整的关节位置 (包含机械臂和方块)
-        episode_states.append(data.qpos.copy())
+        if is_recording:
+            episode_states.append(env.get_obs())
 
         # 2. 获取并应用输入 (生成 Action)
-        input_listener.update(dt)
+        action = env.get_action_from_input(dt)
         
-        # action: 手柄/键盘信号处理后的末端目标状态 (位置 + 姿态 + 夹爪)
-        # [x, y, z, qw, qx, qy, qz, gripper]
-        action = np.concatenate([
-            data.mocap_pos[0],
-            data.mocap_quat[0],
-            [input_listener.gripper_target]
-        ])
-        episode_actions.append(action)
+        if is_recording:
+            episode_actions.append(action)
 
         # 3. 执行控制 (IK + Step)
-        T_wt = mink.SE3.from_mocap_name(model, data, "target")
-        end_effector_task.set_target(T_wt)
-        converge_ik(configuration, tasks, dt, SOLVER, POS_THRESHOLD, ORI_THRESHOLD, MAX_ITERS)
-
-        gripper_target = input_listener.gripper_target
-        configuration.q[7] = gripper_target
-        if configuration.q.shape[0] > 8:
-            configuration.q[8] = gripper_target
-
-        if model.nu > 0:
-            if task.gripper_act1 != -1: data.ctrl[task.gripper_act1] = gripper_target
-            if task.gripper_act2 != -1: data.ctrl[task.gripper_act2] = gripper_target
-            for i in range(model.nu):
-                if i != task.gripper_act1 and i != task.gripper_act2:
-                    data.ctrl[i] = configuration.q[i]
+        env.step(dt)
         
-        mujoco.mj_step(model, data)
-
-        width, height = glfw.get_framebuffer_size(window)
-
-        # 1. 左侧视图 (主相机)
-        viewport1 = mujoco.MjrRect(0, 0, width // 3, height)
-        mujoco.mjv_updateScene(model, data, opt, pert, cam, mujoco.mjtCatBit.mjCAT_ALL, scene)
-        mujoco.mjr_render(viewport1, scene, context)
-
-        # 2. 中间视图 (全局概览)
-        viewport2 = mujoco.MjrRect(width // 3, 0, width // 3, height)
-        mujoco.mjv_updateScene(model, data, opt, pert, cam2, mujoco.mjtCatBit.mjCAT_ALL, scene)
-        mujoco.mjr_render(viewport2, scene, context)
-
-        # 3. 右侧视图 (手眼相机)
-        viewport3 = mujoco.MjrRect(2 * (width // 3), 0, width - 2 * (width // 3), height)
-        mujoco.mjv_updateScene(model, data, opt, pert, cam3, mujoco.mjtCatBit.mjCAT_ALL, scene)
-        mujoco.mjr_render(viewport3, scene, context)
-
-        if task.check_completion(model, data):
-            print(f"任务完成！保存第 {episode_idx} 条轨迹...")
-            save_dataset(episode_states, episode_actions, args.dataset_path, episode_idx)
-            episode_idx += 1
-            input_listener.reset_simulation()
-
-        glfw.swap_buffers(window)
-        glfw.poll_events()
+        # 4. 渲染
+        env.render(is_recording, episode_count, len(episode_states))
+        
         rate.sleep()
 
-    glfw.terminate()
+    env.close()
 
 if __name__ == "__main__":
     main()

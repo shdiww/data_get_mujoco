@@ -19,7 +19,7 @@ class PickAndPlaceTask:
             if jnt_id != -1:
                 q_addr = model.jnt_qposadr[jnt_id]
                 data.qpos[q_addr:q_addr+7] = model.qpos0[q_addr:q_addr+7]
-                data.qpos[q_addr] += np.random.uniform(-0.05, 0.25) # X轴: 偏前/上
+                data.qpos[q_addr] += np.random.uniform(-0.03, 0.28) # X轴: 偏前/上
                 data.qpos[q_addr+1] += np.random.uniform(-0.1, 0.2)  # Y轴: 偏左
 
     def reset(self, model, data, start_qpos, configuration, initial_pos, input_listener):
