@@ -68,6 +68,7 @@ class RealEnv:
         video_dir = output_dir.joinpath('videos')
         video_dir.mkdir(parents=True, exist_ok=True)
         zarr_path = str(output_dir.joinpath('replay_buffer.zarr').absolute())
+        # 初始化 ReplayBuffer，底层使用 Zarr 存储，模式为追加 ('a')
         replay_buffer = ReplayBuffer.create_from_path(
             zarr_path=zarr_path, mode='a')
 
@@ -373,6 +374,7 @@ class RealEnv:
         self.realsense.start_recording(video_path=video_paths, start_time=start_time)
 
         # create accumulators
+        # 创建累加器，用于在内存中暂存录制过程中的观测和动作数据
         self.obs_accumulator = TimestampObsAccumulator(
             start_time=start_time,
             dt=1/self.frequency
@@ -402,6 +404,7 @@ class RealEnv:
             # Since the only way to accumulate obs and action is by calling
             # get_obs and exec_actions, which will be in the same thread.
             # We don't need to worry new data come in here.
+            # 获取累加器中的数据
             obs_data = self.obs_accumulator.data
             obs_timestamps = self.obs_accumulator.timestamps
 
@@ -410,12 +413,14 @@ class RealEnv:
             stages = self.stage_accumulator.actions
             n_steps = min(len(obs_timestamps), len(action_timestamps))
             if n_steps > 0:
+                # 构建 episode 字典，包含时间戳、动作、阶段和观测数据
                 episode = dict()
                 episode['timestamp'] = obs_timestamps[:n_steps]
                 episode['action'] = actions[:n_steps]
                 episode['stage'] = stages[:n_steps]
                 for key, value in obs_data.items():
                     episode[key] = value[:n_steps]
+                # 将 episode 数据写入 ReplayBuffer (保存到 Zarr 文件)
                 self.replay_buffer.add_episode(episode, compressors='disk')
                 episode_id = self.replay_buffer.n_episodes - 1
                 print(f'Episode {episode_id} saved!')
@@ -426,10 +431,10 @@ class RealEnv:
 
     def drop_episode(self):
         self.end_episode()
+        # 从 ReplayBuffer 中删除最后一条 episode
         self.replay_buffer.drop_episode()
         episode_id = self.replay_buffer.n_episodes
         this_video_dir = self.video_dir.joinpath(str(episode_id))
         if this_video_dir.exists():
             shutil.rmtree(str(this_video_dir))
         print(f'Episode {episode_id} dropped!')
-

@@ -7,7 +7,7 @@ from task import PickAndPlaceTask
 from main import converge_ik, _XML, SOLVER, POS_THRESHOLD, ORI_THRESHOLD, MAX_ITERS
 
 class MujocoEnv:
-    def __init__(self):
+    def __init__(self, obs_resolution=(640, 480)):
         # 加载MuJoCo模型和数据
         self.model = mujoco.MjModel.from_xml_path(_XML.as_posix())
         self.data = mujoco.MjData(self.model)
@@ -75,6 +75,11 @@ class MujocoEnv:
         glfw.set_mouse_button_callback(self.window, self.input_listener.mouse_button)
         glfw.set_scroll_callback(self.window, self.input_listener.scroll)
         
+        # 初始化观测图像缓冲区
+        self.obs_width, self.obs_height = obs_resolution
+        self.offscreen_viewport = mujoco.MjrRect(0, 0, self.obs_width, self.obs_height)
+        self.rgb_buffer = np.zeros((self.obs_height, self.obs_width, 3), dtype=np.uint8)
+
         # 初始重置
         self.reset()
 
@@ -92,9 +97,33 @@ class MujocoEnv:
     def check_completion(self):
         return self.task.check_completion(self.model, self.data)
 
+    def get_images(self):
+        """捕获所有相机的图像"""
+        images = {}
+        
+        # 定义要捕获的相机列表及其名称
+        cameras = [
+            ('camera_0', self.cam),   # 主视角
+            ('camera_1', self.cam2),  # 全局概览
+            ('camera_2', self.cam3)   # 手眼相机
+        ]
+
+        for name, cam in cameras:
+            # 更新场景并渲染到视口
+            mujoco.mjv_updateScene(self.model, self.data, self.opt, self.pert, cam, mujoco.mjtCatBit.mjCAT_ALL, self.scene)
+            mujoco.mjr_render(self.offscreen_viewport, self.scene, self.context)
+            # 读取像素
+            mujoco.mjr_readPixels(self.rgb_buffer, None, self.offscreen_viewport, self.context)
+            # MuJoCo 渲染是倒置的，需要垂直翻转；copy() 确保数据连续且独立
+            images[name] = np.flipud(self.rgb_buffer).copy()
+            
+        return images
+
     def get_obs(self):
-        # 返回当前关节位置
-        return self.data.qpos.copy()
+        # 返回包含状态和图像的字典，与 RealEnv 结构对齐
+        obs = self.get_images()
+        obs['state'] = self.data.qpos.copy()
+        return obs
 
     def get_action_from_input(self, dt):
         # 获取并应用输入 (生成 Action)
