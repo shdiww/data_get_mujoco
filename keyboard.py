@@ -35,9 +35,9 @@ class InputListener:
 
         # 重置逻辑保留在回调中，因为它是单次触发动作
         if act == glfw.PRESS and key == glfw.KEY_R:
-            self._reset_simulation()
+            self.reset_simulation()
 
-    def _reset_simulation(self):
+    def reset_simulation(self):
         """重置仿真环境"""
         mujoco.mj_resetDataKeyframe(self.model, self.data, self.model.key("home").id)
         if self.box_id != -1:
@@ -119,7 +119,7 @@ class InputListener:
 
             # 按钮 Start (7): 重置 (防止连续触发)
             if len(buttons) > 7 and buttons[7] and (len(self.prev_gamepad_buttons) <= 7 or not self.prev_gamepad_buttons[7]):
-                self._reset_simulation()
+                self.reset_simulation()
             
             self.prev_gamepad_buttons = list(buttons)
 

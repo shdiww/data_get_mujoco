@@ -1,0 +1,210 @@
+defaults:
+  - _self_
+  - task: lift_image_abs
+
+# 实验名称，用于日志和目录命名
+name: train_diffusion_unet_hybrid
+#工作空间的目标类
+_target_: diffusion_policy.workspace.train_diffusion_unet_hybrid_workspace.TrainDiffusionUnetHybridWorkspace
+
+# 任务名称，在特定于任务的配置中定义
+task_name: ${task.name}
+# 关于观察、动作等形状的元数据
+shape_meta: ${task.shape_meta}
+# 实验名称后缀
+exp_name: "default"
+
+# 策略的预测范围
+horizon: 16
+# 用作输入的观察步数
+n_obs_steps: 2
+# 预测的动作步数
+n_action_steps: 8
+# 要建模的延迟步数
+n_latency_steps: 0
+# 从数据集中使用的观察步数
+dataset_obs_steps: ${n_obs_steps}
+# 过去的动作对策略是否可见
+past_action_visible: False
+# 关键点的可见率（用于增强）
+keypoint_visible_rate: 1.0
+# 是否使用观察作为扩散模型的全局条件
+obs_as_global_cond: True
+
+policy:
+  # 策略的目标类
+  _target_: diffusion_policy.policy.diffusion_unet_hybrid_image_policy.DiffusionUnetHybridImagePolicy
+
+  # 形状元数据
+  shape_meta: ${shape_meta}
+  
+  # 噪声调度器（DDPM）的配置
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddpm.DDPMScheduler
+    # 训练期间的扩散时间步数
+    num_train_timesteps: 100
+    # beta的初始值
+    beta_start: 0.0001
+    # beta的最终值
+    beta_end: 0.02
+    # beta调度类型
+    beta_schedule: squaredcos_cap_v2
+    # 扩散过程的方差类型
+    variance_type: fixed_small
+    # 是否将样本裁剪到[-1, 1]
+    clip_sample: True
+    # 扩散模型的预测类型（epsilon或sample）
+    prediction_type: epsilon
+
+  # 预测范围
+  horizon: ${horizon}
+  # 预测的总动作步数（包括延迟）
+  n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
+  # 观察步数
+  n_obs_steps: ${n_obs_steps}
+  # 扩散模型的推理步数
+  num_inference_steps: 100
+  # 是否使用观察作为全局条件
+  obs_as_global_cond: ${obs_as_global_cond}
+  # 裁剪观察到的形状
+  crop_shape: [76, 76]
+  # 扩散步骤嵌入的维度
+  diffusion_step_embed_dim: 128
+  # U-Net下采样层中的通道数
+  down_dims: [512, 1024, 2048]
+  # 卷积层的内核大小
+  kernel_size: 5
+  # 组归一化的组数
+  n_groups: 8
+  # 是否预测条件的比例
+  cond_predict_scale: True
+  # 是否在观察编码器中使用组归一化
+  obs_encoder_group_norm: True
+  # 是否在评估期间使用固定裁剪
+  eval_fixed_crop: True
+
+# 模型参数的指数移动平均（EMA）
+ema:
+  _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
+  # 在此步骤之后开始更新EMA模型
+  update_after_step: 0
+  # EMA的逆伽玛参数
+  inv_gamma: 1.0
+  # EMA更新的幂
+  power: 0.75
+  # EMA衰减的最小值
+  min_value: 0.0
+  # EMA衰减的最大值
+  max_value: 0.9999
+
+# 训练数据加载器配置
+dataloader:
+  batch_size: 64
+  num_workers: 8
+  shuffle: True
+  pin_memory: True
+  persistent_workers: False
+
+# 验证数据加载器配置
+val_dataloader:
+  batch_size: 64
+  num_workers: 8
+  shuffle: False
+  pin_memory: True
+  persistent_workers: False
+
+# 优化器配置
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+
+# 训练配置
+training:
+  # 训练设备
+  device: "cuda:0"
+  # 用于可复现性的随机种子
+  seed: 42
+  # 启用调试模式
+  debug: False
+  # 从检查点恢复训练
+  resume: True
+  # 学习率调度器
+  lr_scheduler: cosine
+  # 学习率的预热步数
+  lr_warmup_steps: 500
+  # 训练总轮数
+  num_epochs: 3050
+  # 更新权重前累积的梯度数
+  gradient_accumulate_every: 1
+  # 是否使用EMA
+  use_ema: True
+  # rollout的频率（以轮为单位）
+  rollout_every: 50
+  # 保存检查点的频率（以轮为单位）
+  checkpoint_every: 50
+  # 验证的频率（以轮为单位）
+  val_every: 1
+  # 采样的频率（以轮为单位）
+  sample_every: 5
+  # 每轮的最大训练步数
+  max_train_steps: null
+  # 每轮的最大验证步数
+  max_val_steps: null
+  # tqdm进度条更新间隔
+  tqdm_interval_sec: 1.0
+
+# 日志配置 (wandb)
+logging:
+  # wandb中的项目名称
+  project: diffusion_policy_debug
+  # 恢复登录到同一个wandb运行
+  resume: True
+  # 日志模式（在线或离线）
+  mode: online
+  # wandb运行的名称
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  # wandb运行的标签
+  tags: ["${name}", "${task_name}", "${exp_name}"]
+  # wandb运行的ID（用于恢复）
+  id: null
+  # wandb运行的组
+  group: null
+
+# 检查点配置
+checkpoint:
+  # Top-k检查点配置
+  topk:
+    # 用于保存最佳检查点的监视键
+    monitor_key: test_mean_score
+    # 监视模式（最大或最小）
+    mode: max
+    # 要保存的最佳检查点数
+    k: 5
+    # 检查点文件名的格式字符串
+    format_str: 'epoch={epoch:04d}-test_mean_score={test_mean_score:.3f}.ckpt'
+  # 是否保存最后一个检查点
+  save_last_ckpt: True
+  # 是否保存最后一个快照（完整状态）
+  save_last_snapshot: False
+
+# 多重运行配置（用于扫描）
+multi_run:
+  run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+
+# Hydra配置
+hydra:
+  job:
+    # 覆盖作业的目录名称
+    override_dirname: ${name}
+  run:
+    # 运行输出的目录
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  sweep:
+    # 扫描输出的目录
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    # 扫描中每次运行的子目录
+    subdir: ${hydra.job.num}

@@ -13,13 +13,20 @@ from keyboard import InputListener
 from task import PickAndPlaceTask
 from main import converge_ik, _XML, SOLVER, POS_THRESHOLD, ORI_THRESHOLD, MAX_ITERS
 
-def save_dataset(states, actions, filename="episode.zarr"):
-    """保存数据到 Zarr 文件"""
-    print(f"Saving {len(states)} frames to {filename}...")
-    root = zarr.open(filename, mode='w')
-    root.create_dataset('state', data=np.array(states), chunks=False, overwrite=True)
-    root.create_dataset('action', data=np.array(actions), chunks=False, overwrite=True)
-    print("Done.")
+def save_dataset(states, actions, filename="episode.zarr", episode_idx=0):
+    """保存数据到 Zarr 文件 (Group format)"""
+    print(f"Saving episode {episode_idx} with {len(states)} frames to {filename}...")
+    mode = 'a' if Path(filename).exists() else 'w'
+    root = zarr.open(filename, mode=mode)
+    
+    for key in ['action', 'state']:
+        if key not in root:
+            root.create_group(key)
+            
+    key_name = f"chunk_{episode_idx}"
+    root['action'].create_dataset(key_name, data=np.array(actions), chunks=False, overwrite=True)
+    root['state'].create_dataset(key_name, data=np.array(states), chunks=False, overwrite=True)
+    print(f"Saved episode {episode_idx} to action/{key_name} and state/{key_name}.")
 
 def main():
     parser = argparse.ArgumentParser(description="Record Mujoco episode to Zarr")
@@ -91,6 +98,25 @@ def main():
 
     rate = RateLimiter(frequency=200.0, warn=False)
     
+    # 确定起始 episode_idx
+    episode_idx = 0
+    if Path(args.dataset_path).exists():
+        try:
+            root = zarr.open(args.dataset_path, mode='r')
+            if 'action' in root:
+                indices = []
+                for k in root['action'].keys():
+                    if k.startswith('chunk_'):
+                        try:
+                            indices.append(int(k.split('_')[1]))
+                        except ValueError:
+                            continue
+                if indices:
+                    episode_idx = max(indices) + 1
+        except Exception:
+            pass
+    print(f"Next episode index: {episode_idx}")
+
     # 数据缓冲区
     episode_states = []
     episode_actions = []
@@ -164,9 +190,10 @@ def main():
         mujoco.mjr_render(viewport3, scene, context)
 
         if task.check_completion(model, data):
-            print("任务完成！")
-            save_dataset(episode_states, episode_actions, filename=args.dataset_path)
-            break
+            print(f"任务完成！保存第 {episode_idx} 条轨迹...")
+            save_dataset(episode_states, episode_actions, args.dataset_path, episode_idx)
+            episode_idx += 1
+            input_listener.reset_simulation()
 
         glfw.swap_buffers(window)
         glfw.poll_events()
