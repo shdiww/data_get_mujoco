@@ -1,93 +1,57 @@
-# MuJoCo Panda Pick and Place with Mink
+# MuJoCo Data Collection for Diffusion Policy
 
-这是一个基于 MuJoCo 物理引擎和 Mink (Inverse Kinematics Library) 的 Franka Emika Panda 机械臂抓取放置任务仿真项目。
+这是一个用于在 MuJoCo 仿真环境中采集机械臂示教数据的项目。该项目整合了 `mujoco` 物理引擎、`mink` 逆运动学求解器和 `pygame` 手柄控制，生成的数据格式（Zarr）可直接用于 Diffusion Policy 的训练。
 
-## 环境配置 (Installation)
+## 项目结构
 
-本项目基于 Python 开发。建议使用 Conda 创建独立的虚拟环境。
+*   **`collect_date_sim.py`**: 仿真数据采集的主入口脚本。
+*   **`mujoco_diffusion/`**: 仿真核心功能包。
+    *   `mujoco_env.py`: 封装了 MuJoCo 环境、渲染逻辑以及基于 Mink 的 IK 控制器。
+    *   `gamepad_controller.py`: 封装了 Xbox 手柄的输入处理逻辑。
+    *   `task.py`: 定义了“抓取与放置”任务的逻辑（如物体随机化、成功判定）。
+*   **`model/`**: 存放 MuJoCo XML 模型文件（如 Franka Emika Panda 机械臂）。
+*   **`data/`**: 默认的数据集输出目录。
+*   **`diffusion_policy/`**: 包含 ReplayBuffer 等数据处理工具。
 
-### 1. 创建 Conda 环境
+## 依赖安装
 
-```bash
-conda create -n mujoco_env python=3.10
-conda activate mujoco_env
-```
-
-### 2. 安装依赖
-
-主要依赖库包括 `mink`、`mujoco` 以及用于控制循环频率的工具。
-
-推荐直接安装带有示例依赖的 `mink`，这会自动安装本项目所需的大部分依赖（包括 `mujoco`, `glfw`, `loop_rate_limiters` 等）：
+请确保你的 Python 环境中安装了以下核心依赖：
 
 ```bash
-pip install "mink[examples]"
+pip install mujoco mink glfw pygame zarr numpy scipy
 ```
 
-如果你发现缺少 `loop_rate_limiters` 或其他特定库，可以单独安装：
+*(注：还需要安装 `diffusion_policy` 及其相关依赖)*
+
+## 使用说明
+
+### 1. 启动采集
+
+连接 Xbox 手柄，然后在项目根目录下运行：
 
 ```bash
-pip install loop_rate_limiters glfw numpy
+python collect_date_sim.py
 ```
 
-## 运行 (Usage)
+### 2. 手柄操作指南
 
-在项目根目录下，运行主程序启动仿真：
+| 按键/摇杆 | 功能 |
+| :--- | :--- |
+| **左摇杆** | 控制机械臂末端在 **XY 平面** 移动 |
+| **右摇杆 (上下)** | 控制机械臂末端在 **Z 轴** (高度) 移动 |
+| **A 键** | **闭合**夹爪 |
+| **B 键** | **张开**夹爪 |
+| **Back 键** (左侧小按钮) | **开始 / 停止录制** |
+| **Start 键** (右侧小按钮) | **重置环境** (若正在录制，会自动保存当前回合) |
 
-```bash
-python main.py
-```
+> **注意**: 当前配置下，为了简化抓取任务，末端执行器的**旋转功能已禁用**，机械臂将始终保持垂直向下的姿态。
 
-## 操作说明 (Controls)
+### 3. 数据录制与保存
 
-仿真启动后，你可以通过键盘和鼠标控制机械臂末端的目标位置（Mocap Target）以及相机视角。
-
-### 机械臂控制
-*   **W / S**: 沿 X 轴移动末端目标 (前后)
-*   **A / D**: 沿 Y 轴移动末端目标 (左右)
-*   **Q / E**: 沿 Z 轴移动末端目标 (上下)
-*   **Z**: 闭合夹爪 (抓取)
-*   **X**: 张开夹爪 (释放)
-*   **Shift (按住)**: 加快移动速度和夹爪开合速度
-
-### Xbox 手柄控制
-*   **左摇杆**: 前后左右移动 (XY轴)
-*   **右摇杆 (上下)**: 上下移动 (Z轴)
-*   **A 键**: 闭合夹爪
-*   **B 键**: 张开夹爪
-*   **Start 键**: 重置仿真
-
-### 系统控制
-*   **R**: 重置仿真环境，并随机刷新红色方块的位置
-
-### 任务目标
-
-1.  控制机械臂移动到**红色方块**上方。
-2.  抓取方块，将其移动到地板上的**绿色半透明目标区域**。
-3.  松开夹爪并抬起机械臂。当方块完全进入目标区域且机械臂抬起后，任务完成，环境会自动重置。
-   
-## 数据录制与回放 (Recording & Replay)
-
-本项目提供了录制和回放操作轨迹的功能，数据保存为 Zarr 格式。
-
-### 录制 (Recording)
-
-运行 `record_episode.py` 脚本开始录制。操作方式与主程序一致，支持三个相机视角。
-
-```bash
-python record_episode.py --dataset_path my_episode.zarr
-```
-
-*   **保存机制**: 当任务完成（方块放入目标区域）时，脚本会自动保存数据到指定路径并退出。
-*   **重置**: 如果在录制过程中按 `R` 重置环境，当前的录制缓冲区会被清空，重新开始录制。
-*   **数据格式**: 保存为 Zarr 文件，包含 `state` (关节状态) 和 `action` (末端目标及夹爪状态)，且不分块存储 (single chunk)。
-
-### 回放 (Replay)
-
-运行 `replay_episode.py` 脚本回放录制的数据集。
-
-```bash
-python replay_episode.py --dataset_path my_episode.zarr
-```
-
-*   **初始化**: 脚本会读取数据集的第一帧状态，强制设置环境（包括机械臂和方块位置），确保回放初始条件一致。
-*   **执行**: 脚本将逐帧读取 `action` 并应用到控制器中，复现录制时的运动轨迹。
+*   **开始录制**: 按下 **Back 键**，界面左上角会显示 `RECORDING`。
+*   **保存数据**:
+    *   再次按下 **Back 键** 停止录制。
+    *   或者按下 **Start 键** 手动重置环境。
+    *   或者完成任务（方块放入目标区并抬起），环境自动重置。
+    *   以上操作都会触发数据保存，数据将追加写入到 `data/mujoco_demo.zarr` 文件中。
+*   **无效数据**: 步数过短（<10步）的回合会被自动丢弃。

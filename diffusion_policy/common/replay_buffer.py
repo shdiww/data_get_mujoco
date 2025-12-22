@@ -95,8 +95,19 @@ class ReplayBuffer:
         assert('data' in root)
         assert('meta' in root)
         assert('episode_ends' in root['meta'])
-        for key, value in root['data'].items():
-            assert(value.shape[0] == root['meta']['episode_ends'][-1])
+        # Check for data consistency only if the buffer is not empty
+        if len(root['meta']['episode_ends']) > 0:
+            n_steps = root['meta']['episode_ends'][-1]
+            for key, value in root['data'].items():
+                assert(value.shape[0] == n_steps)
+        else:
+            # if buffer is empty, all data arrays must also be empty
+            for key, value in root['data'].items():
+                if not value.shape[0] == 0:
+                    # This can happen if a previous run was interrupted.
+                    # Treat the buffer as empty and warn the user.
+                    print(f"Warning: ReplayBuffer is inconsistent. Meta is empty but data array '{key}' is not. Clearing data.")
+                    value.resize(0, *value.shape[1:])
         self.root = root
     
     # ============= create constructors ===============
