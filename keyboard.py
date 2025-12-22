@@ -25,6 +25,8 @@ class InputListener:
         self.MOVE_SPEED = 0.2  # m/s
         self.GRIPPER_SPEED = 0.15  # m/s
         self.prev_gamepad_buttons = []
+        self.joystick_logged = False
+        self.joystick_id = None
 
     def keyboard(self, window, key, scancode, act, mods):
         if act == glfw.PRESS:
@@ -90,36 +92,66 @@ class InputListener:
         self.gripper_target += get_weight(glfw.KEY_X) * gripper_step
 
         # --- Xbox 手柄控制 ---
-        if glfw.joystick_present(glfw.JOYSTICK_1):
-            axes_state, axes_count = glfw.get_joystick_axes(glfw.JOYSTICK_1)
-            axes = [axes_state[i] for i in range(axes_count)]
-            buttons_state, buttons_count = glfw.get_joystick_buttons(glfw.JOYSTICK_1)
-            buttons = [buttons_state[i] for i in range(buttons_count)]
+        # 自动搜索有效手柄 (跳过鼠标接收器等设备)
+        if self.joystick_id is None or not glfw.joystick_present(self.joystick_id):
+            self.joystick_id = None
+            for jid in range(glfw.JOYSTICK_1, glfw.JOYSTICK_16 + 1):
+                if glfw.joystick_present(jid):
+                    _, axes_count = glfw.get_joystick_axes(jid)
+                    _, buttons_count = glfw.get_joystick_buttons(jid)
+                    # 过滤条件：至少2个轴和1个按钮，才认为是有效手柄
+                    if axes_count >= 2 and buttons_count > 0:
+                        self.joystick_id = jid
+                        break
+
+        if self.joystick_id is not None:
+            axes_state, axes_count = glfw.get_joystick_axes(self.joystick_id)
+            try:
+                axes = [axes_state[i] for i in range(axes_count)]
+            except:
+                axes = []
+            buttons_state, buttons_count = glfw.get_joystick_buttons(self.joystick_id)
+            try:
+                buttons = [buttons_state[i] for i in range(buttons_count)]
+            except:
+                buttons = []
             
+            if not self.joystick_logged:
+                print(f"\n[InputListener] 检测到手柄: {glfw.get_joystick_name(self.joystick_id)} (ID: {self.joystick_id})")
+                print(f"[InputListener] 轴数量: {len(axes)}, 按钮数量: {len(buttons)}")
+                self.joystick_logged = True
+
             # 死区设置 (防止漂移)
             deadzone = 0.15
             
+            
             # 左摇杆 (Axes 0/1): 控制 XY 平面移动
             # Axis 1 (Y) 通常是反向的 (上是 -1)
-            if abs(axes[1]) > deadzone:
-                self.data.mocap_pos[0, 0] -= axes[1] * self.MOVE_SPEED * dt
-            if abs(axes[0]) > deadzone:
-                self.data.mocap_pos[0, 1] -= axes[0] * self.MOVE_SPEED * dt
+            if len(axes) > 1:
+                if abs(axes[1]) > deadzone:
+                    self.data.mocap_pos[0, 0] -= axes[1] * self.MOVE_SPEED * dt
+                if abs(axes[0]) > deadzone:
+                    self.data.mocap_pos[0, 1] -= axes[0] * self.MOVE_SPEED * dt
 
             # 右摇杆 Y轴 (Axis 4): 控制 Z 轴高度
-            if abs(axes[4]) > deadzone:
+            if len(axes) > 4 and abs(axes[4]) > deadzone:
                 self.data.mocap_pos[0, 2] -= axes[4] * self.MOVE_SPEED * dt
 
             # 按钮 A (0): 闭合夹爪
-            if buttons[0]:
+            if len(buttons) > 0 and buttons[0]:
                 self.gripper_target -= self.GRIPPER_SPEED * dt
             # 按钮 B (1): 张开夹爪
-            if buttons[1]:
+            if len(buttons) > 1 and buttons[1]:
                 self.gripper_target += self.GRIPPER_SPEED * dt
 
             # 按钮 Start (7): 重置 (防止连续触发)
-            if len(buttons) > 7 and buttons[7] and (len(self.prev_gamepad_buttons) <= 7 or not self.prev_gamepad_buttons[7]):
-                self.reset_simulation()
+            if len(buttons) > 7 and buttons[7]:
+                # 检查上一帧是否按下
+                was_pressed = False
+                if len(self.prev_gamepad_buttons) > 7 and self.prev_gamepad_buttons[7]:
+                    was_pressed = True
+                if not was_pressed:
+                    self.reset_simulation()
             
             self.prev_gamepad_buttons = list(buttons)
 
