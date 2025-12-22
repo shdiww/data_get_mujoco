@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  
+  <!-- Gazebo physics and gravity settings -->
+  <gazebo>
+    <physics type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <real_time_update_rate>1000</real_time_update_rate>
+    </physics>
+    
+    <gravity>0 0 -9.81</gravity>
+  </gazebo>
+  
+  <!-- Material definitions for Gazebo -->
+  <gazebo reference="BASE">
+    <material>Gazebo/Grey</material>
+    <mu1>2</mu1>  <!--静摩擦 -->
+    <mu2>2</mu2>  <!--动态摩擦系数 -->
+  </gazebo>
+  
+  <gazebo reference="BODY">
+    <material>Gazebo/Grey</material>
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+  </gazebo>
+  
+  <gazebo reference="TORSO">
+    <material>Gazebo/Grey</material>
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+  </gazebo>
+  
+  <gazebo reference="CHEST">
+    <material>Gazebo/Grey</material>
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+  </gazebo>
+  
+  <!-- Default friction for all other links -->
+  <gazebo reference="SCAPULA_L">
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+  </gazebo>
+  
+  <gazebo reference="SCAPULA_R">
+    <mu1>0.5</mu1>
+    <mu2>0.5</mu2>
+  </gazebo>
+  
+  <!-- Disable collision between certain link pairs if needed -->
+  <gazebo reference="Lift_Front_Roll">
+    <material>Gazebo/Black</material>
+    <mu1>0.8</mu1>
+    <mu2>0.8</mu2>
+  </gazebo>
+  
+  <gazebo reference="Right_Front_Roll">
+    <material>Gazebo/Black</material>
+    <mu1>0.8</mu1>
+    <mu2>0.8</mu2>
+  </gazebo>
+  
+  <gazebo reference="Lift_Behind_Roll">
+    <material>Gazebo/Black</material>
+    <mu1>0.8</mu1>
+    <mu2>0.8</mu2>
+  </gazebo>
+  
+  <gazebo reference="Right_Behind_Roll">
+    <material>Gazebo/Black</material>
+    <mu1>0.8</mu1>
+    <mu2>0.8</mu2>
+  </gazebo>
+  
+  <gazebo reference="Lift_Roll">
+    <material>Gazebo/Black</material>
+    <mu1>0.8</mu1>
+    <mu2>0.8</mu2>
+  </gazebo>
+  
+  <gazebo reference="Right_Roll">
+    <material>Gazebo/Black</material>
+    <mu1>0.8</mu1>
+    <mu2>0.8</mu2>
+  </gazebo>
+
+</robot>

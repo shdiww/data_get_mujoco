@@ -1,0 +1,46 @@
+<launch>
+  <include
+    file="$(find gazebo_ros)/launch/empty_world.launch">
+    <arg name="paused" value="false"/>
+    <arg name="use_sim_time" value="true"/>
+    <arg name="gui" value="true"/>
+  </include>
+  
+  <param name="robot_description"
+    textfile="$(find WA1_D11)/urdf/WA1_D11.urdf" />
+  
+  <!-- 发送机器人状态 发布频率是50hz -->
+  <node
+    name="robot_state_publisher"
+    pkg="robot_state_publisher"
+    type="robot_state_publisher">
+    <param name="publish_frequency" value="50"/> 
+  </node>
+  <!-- 节点状态发布 这个节点本来是可以通过图形化界面手动调节关节状态，false代表禁用 -->
+  <node
+    name="joint_state_publisher"
+    pkg="joint_state_publisher"
+    type="joint_state_publisher">
+    <param name="use_gui" value="false"/>
+  </node>
+  
+  <node
+    name="tf_footprint_base"
+    pkg="tf"
+    type="static_transform_publisher"
+    args="0 0 0 0 0 0 BASE base_link 40" />
+  
+  <node
+    name="spawn_model"
+    pkg="gazebo_ros"
+    type="spawn_model"
+    args="-urdf -param robot_description -model WA1_D11 -x 0 -y 0 -z 1.0 "
+    output="screen" />
+  
+  <node
+    name="fake_joint_calibration"
+    pkg="rostopic"
+    type="rostopic"
+    args="pub /calibrated std_msgs/Bool true" />
+
+</launch>

@@ -1,0 +1,4 @@
+float32[] jnt_angle         # 控制手臂时的顺序：左/右手臂各7个关节空间数组; Shoulder_Y_*, Shoulder_X_*,Shoulder_Z_*,Elbow_*,Wrist_Z_*,Wrist_Y_*,Wrist_X_*;
+bool not_wait               # 等待或立即执行 
+---
+std_msgs/Bool finish        # indicate successful run of triggered service
