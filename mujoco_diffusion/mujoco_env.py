@@ -210,7 +210,7 @@ class MujocoEnv:
             'qvel': qvel,
             'images': images,
             'timestamp': time.time(),
-            'robot_eef_pose': self.data.site_xpos[self.task.attachment_site_id].copy()
+            'robot_eef_pose': state
         }
 
     def render(self, fps=0.0, gripper_val=0.0, is_recording=False):

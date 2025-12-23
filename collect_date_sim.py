@@ -8,6 +8,7 @@ from scipy.spatial.transform import Rotation as R
 from diffusion_policy.common.replay_buffer import ReplayBuffer # This is correct
 from mujoco_diffusion.mujoco_env import MujocoEnv # Correctly imports from the package
 from mujoco_diffusion.gamepad_controller import GamepadController # Correctly imports from the package
+from mujoco_diffusion.video_recorder import VideoRecorder
 
 def main():
     # 配置
@@ -42,41 +43,61 @@ def main():
     POS_LIMITS = np.array([[-0.5, 0.8], [-0.5, 0.5], [0.0, 0.8]]) 
 
     # --- 录制相关初始化 ---
-    dataset_path = "data/mujoco_demo.zarr"
-    replay_buffer = ReplayBuffer.create_from_path(zarr_path=dataset_path, mode='a')
-    print(f"数据集将保存至: {dataset_path}")
+    zarr_path = str(dataset_root.joinpath("replay_buffer.zarr"))
+    replay_buffer = ReplayBuffer.create_from_path(zarr_path=zarr_path, mode='a')
+    print(f"数据集将保存至: {dataset_root}")
     
     is_recording = False
-    episode_obs = []
-    episode_actions = []
     last_time = time.time()
     fps = 0.0
 
-    def save_episode():
-        """将内存中的数据保存到Zarr文件"""
-        nonlocal episode_obs, episode_actions
-        if len(episode_obs) < 10:
-            print("回合太短，已丢弃。")
-        else:
-            print(f"正在保存 {len(episode_obs)} 步...")
-            # 构造数据字典
-            data = dict()
-            # 提取 state
-            data['state'] = np.array([x['state'] for x in episode_obs])
-            # 提取 timestamp
-            data['timestamp'] = np.array([x['timestamp'] for x in episode_obs])
-            # 提取图像
-            if 'images' in episode_obs[0]:
-                for cam_name in episode_obs[0]['images'].keys():
-                    data[cam_name] = np.array([x['images'][cam_name] for x in episode_obs])
-            
-            data['action'] = np.array(episode_actions)
-            replay_buffer.add_episode(data, compressors='disk')
-            print(f"已保存至 {dataset_path}。总回合数: {replay_buffer.n_episodes}")
+    # 临时缓存 (只存低维数据)
+    episode_low_dim = {
+        'state': [],
+        'action': [],
+        'timestamp': []
+    }
+
+    # 初始化视频录制器
+    recorder = VideoRecorder(video_dir, camera_names, fps=30.0, resolution=(env.obs_width, env.obs_height))
+
+    def start_recording():
+        nonlocal is_recording, episode_low_dim
+        is_recording = True
+        print("\n[录制] 开始")
         
-        # 清空缓存，准备下一回合
-        episode_obs = []
-        episode_actions = []
+        # 重置缓存
+        episode_low_dim['state'] = []
+        episode_low_dim['action'] = []
+        episode_low_dim['timestamp'] = []
+        
+        # 准备视频录制
+        episode_idx = replay_buffer.n_episodes
+        recorder.start_recording(episode_idx)
+
+    def stop_recording(save=True):
+        nonlocal is_recording, episode_low_dim
+        is_recording = False
+        print(f"\n[录制] 停止。")
+
+        # 检查数据长度，如果太短则不保存
+        if save and len(episode_low_dim['timestamp']) <= 10:
+            print("回合太短，已丢弃。")
+            save = False
+
+        recorder.stop_recording(save=save)
+
+        if save:
+            print(f"正在保存 {len(episode_low_dim['timestamp'])} 步数据...")
+            
+            data = {
+                'state': np.array(episode_low_dim['state'], dtype=np.float32),
+                'action': np.array(episode_low_dim['action'], dtype=np.float32),
+                'timestamp': np.array(episode_low_dim['timestamp'], dtype=np.float64)
+            }
+            
+            replay_buffer.add_episode(data, compressors='disk')
+            print(f"已保存至 Zarr。总回合数: {replay_buffer.n_episodes}")
 
     # 主循环 (使用 env.window 判断退出)
     while not glfw.window_should_close(env.window):
@@ -119,27 +140,26 @@ def main():
             # --- 收集数据 (在 Step 之前) ---
             if is_recording:
                 # 1. 写入视频帧
-                for name, img in obs['images'].items():
-                    if name in video_writers:
-                        # MuJoCo RGB -> OpenCV BGR
-                        bgr_img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                        video_writers[name].write(bgr_img)
+                recorder.write_frame(obs['images'])
                 
-                # 2. 记录低维数据 (转为 6维: XYZ + RotVec)
+                # 2. 记录低维数据 (转为 7维: XYZ + RotVec + Gripper)
                 # State: 实际末端位姿
                 eef_pos = obs['robot_eef_pose'][:3]
                 eef_quat = obs['robot_eef_pose'][3:] # wxyz
                 r = R.from_quat(eef_quat[[1, 2, 3, 0]]) # xyzw
-                state_6d = np.concatenate([eef_pos, r.as_rotvec()])
+                
+                # 获取夹爪实际宽度 (假设最后两个关节是手指)
+                gripper_width = np.mean(obs['qpos'][-2:])
+                state_7d = np.concatenate([eef_pos, r.as_rotvec(), [gripper_width]])
                 
                 # Action: 目标位姿 (Mocap)
                 mocap_pos = env.data.mocap_pos[0].copy()
                 mocap_quat = env.data.mocap_quat[0].copy() # wxyz
                 r_target = R.from_quat(mocap_quat[[1, 2, 3, 0]])
-                action_6d = np.concatenate([mocap_pos, r_target.as_rotvec()])
+                action_7d = np.concatenate([mocap_pos, r_target.as_rotvec(), [gripper_target]])
 
-                episode_low_dim['state'].append(state_6d)
-                episode_low_dim['action'].append(action_6d)
+                episode_low_dim['state'].append(state_7d)
+                episode_low_dim['action'].append(action_7d)
                 episode_low_dim['timestamp'].append(time.time())
 
             obs = env.step(gripper_target)
