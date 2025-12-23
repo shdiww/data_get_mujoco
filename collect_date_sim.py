@@ -1,7 +1,10 @@
+import pathlib
+import cv2
 import time
 import numpy as np
 import mujoco
 import glfw
+from scipy.spatial.transform import Rotation as R
 from diffusion_policy.common.replay_buffer import ReplayBuffer # This is correct
 from mujoco_diffusion.mujoco_env import MujocoEnv # Correctly imports from the package
 from mujoco_diffusion.gamepad_controller import GamepadController # Correctly imports from the package
@@ -12,6 +15,14 @@ def main():
     # 根据 XML 文件修改相机名称: "overview" (场景相机) 和 "hand_camera" (手眼相机)
     camera_names = ["overview", "hand_camera"]
     
+    # 数据集根目录
+    dataset_root = pathlib.Path("data/mujoco_demo")
+    dataset_root.mkdir(parents=True, exist_ok=True)
+    
+    # 视频目录
+    video_dir = dataset_root.joinpath("videos")
+    video_dir.mkdir(parents=True, exist_ok=True)
+
     # 1. 初始化环境 (替代 RealEnv)
     env = MujocoEnv(xml_path, camera_names=camera_names, frequency=30)
     
@@ -81,21 +92,16 @@ def main():
             if reset_cmd:
                 print("已通过手柄重置！")
                 if is_recording:
-                    print("正在保存当前回合数据...")
-                    save_episode()
+                    stop_recording(save=True)
                 env.reset()
                 gripper_target = 0.04
 
             # --- 录制控制 ---
             if controller.is_record_toggled():
-                is_recording = not is_recording
-                if is_recording:
-                    print("\n[录制] 开始")
-                    episode_obs = []
-                    episode_actions = []
+                if not is_recording:
+                    start_recording()
                 else:
-                    print(f"\n[录制] 停止。")
-                    save_episode()
+                    stop_recording(save=True)
 
             # --- 更新 Mocap 目标 (Target) ---
             # 我们直接修改 data.mocap_pos，Mink IK 会在 env.step 中让机械臂去追这个点
@@ -112,16 +118,29 @@ def main():
             
             # --- 收集数据 (在 Step 之前) ---
             if is_recording:
-                # 1. 记录当前观测 (Obs)
-                episode_obs.append(obs)
+                # 1. 写入视频帧
+                for name, img in obs['images'].items():
+                    if name in video_writers:
+                        # MuJoCo RGB -> OpenCV BGR
+                        bgr_img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                        video_writers[name].write(bgr_img)
                 
-                # 2. 记录当前动作 (Action)
-                # Action = Mocap Pose (7维: 3 pos + 4 quat)
-                current_action = np.concatenate([
-                    env.data.mocap_pos[0],
-                    env.data.mocap_quat[0]
-                ])
-                episode_actions.append(current_action)
+                # 2. 记录低维数据 (转为 6维: XYZ + RotVec)
+                # State: 实际末端位姿
+                eef_pos = obs['robot_eef_pose'][:3]
+                eef_quat = obs['robot_eef_pose'][3:] # wxyz
+                r = R.from_quat(eef_quat[[1, 2, 3, 0]]) # xyzw
+                state_6d = np.concatenate([eef_pos, r.as_rotvec()])
+                
+                # Action: 目标位姿 (Mocap)
+                mocap_pos = env.data.mocap_pos[0].copy()
+                mocap_quat = env.data.mocap_quat[0].copy() # wxyz
+                r_target = R.from_quat(mocap_quat[[1, 2, 3, 0]])
+                action_6d = np.concatenate([mocap_pos, r_target.as_rotvec()])
+
+                episode_low_dim['state'].append(state_6d)
+                episode_low_dim['action'].append(action_6d)
+                episode_low_dim['timestamp'].append(time.time())
 
             obs = env.step(gripper_target)
 
@@ -129,8 +148,7 @@ def main():
             if env.task.check_completion(env.model, env.data):
                 print("任务完成！正在重置...")
                 if is_recording:
-                    print("正在保存当前回合数据...")
-                    save_episode()
+                    stop_recording(save=True)
                 env.reset()
                 gripper_target = 0.04 # 重置后夹爪默认张开
 
