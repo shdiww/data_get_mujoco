@@ -29,7 +29,7 @@ def main():
     
     # 2. 初始化手柄 (替代 SpaceMouse)
     # max_pos_speed: m/s, max_rot_speed: rad/s
-    controller = GamepadController(max_pos_speed=0.1, max_rot_speed=0.4)
+    controller = GamepadController(max_pos_speed=0.1)
     
     print("准备就绪！请使用左摇杆/扳机键移动。旋转功能已禁用。")
 
