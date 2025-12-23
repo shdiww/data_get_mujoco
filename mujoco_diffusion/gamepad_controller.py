@@ -2,12 +2,11 @@ import pygame
 import numpy as np
 
 class GamepadController:
-    def __init__(self, max_pos_speed=0.5, max_rot_speed=1.0, deadzone=0.1):
+    def __init__(self, max_pos_speed=0.5, deadzone=0.1):
         """
         初始化 Pygame 手柄控制器
         Args:
             max_pos_speed: 最大平移速度 (m/s)
-            max_rot_speed: 最大旋转速度 (rad/s)
             deadzone: 摇杆死区 (0.0-1.0)
         """
         pygame.init()
@@ -22,7 +21,6 @@ class GamepadController:
             print("[手柄] 未找到手柄！将返回零动作。")
             
         self.max_pos_speed = max_pos_speed
-        self.max_rot_speed = max_rot_speed
         self.deadzone = deadzone
         
         
@@ -36,7 +34,7 @@ class GamepadController:
         读取手柄输入并返回控制指令
         Returns:
             dpos (np.ndarray): 平移速度 [dx, dy, dz]
-            drot (np.ndarray): 旋转速度 [drx, dry, drz]
+            drot (np.ndarray): 旋转速度 [drx, dry, drz] (始终为零)
             gripper_cmd (float): 夹爪控制指令 (-1.0 闭合, 1.0 张开, 0.0 保持)
             reset_cmd (bool): 是否触发重置
         """
@@ -68,25 +66,6 @@ class GamepadController:
         # This matches the user's reference from `keyboard.py`
         if self.joystick.get_numaxes() > 4:
             dpos[2] = -self.apply_deadzone(self.joystick.get_axis(4)) * self.max_pos_speed
-
-        # 2. 旋转控制 (右摇杆X + 肩键 + D-Pad)
-        # Pitch (绕Y轴) 映射到 D-Pad 上下
-        if self.joystick.get_numhats() > 0:
-            hat_y = self.joystick.get_hat(0)[1]
-            if hat_y != 0:
-                # D-Pad Up is +1, Down is -1.
-                drot[1] = hat_y * self.max_rot_speed
-
-        # Yaw (绕Z轴) 使用右摇杆X轴
-        if self.joystick.get_numaxes() > 3:
-            drot[2] = -self.apply_deadzone(self.joystick.get_axis(3)) * self.max_rot_speed
-        
-        # Roll (绕X轴) 映射到肩键 (LB/RB)
-        # 按钮 4 (LB), 5 (RB)
-        if self.joystick.get_button(4):
-            drot[0] = -1.0 * self.max_rot_speed
-        elif self.joystick.get_button(5):
-            drot[0] = 1.0 * self.max_rot_speed
 
         # 3. 夹爪控制 (A键闭合, B键张开)
         # 按钮 0 (A), 1 (B)
