@@ -39,6 +39,7 @@ class DiffusionUnetVideoPolicy(BaseImagePolicy):
         super().__init__()
 
         # parse shape_meta
+        # 解析 shape_meta，获取动作维度和观测配置
         action_shape = shape_meta['action']['shape']
         assert len(action_shape) == 1
         action_dim = action_shape[0]
@@ -54,6 +55,7 @@ class DiffusionUnetVideoPolicy(BaseImagePolicy):
             type = attr.get('type', 'lowdim')
             if type == 'rgb':
                 # assign network for each rgb input
+                # 为每个 RGB 输入分配网络
                 if len(rgb_nets_map) == 0:
                     net = rgb_net
                 else:
@@ -61,8 +63,10 @@ class DiffusionUnetVideoPolicy(BaseImagePolicy):
                 rgb_nets_map[key] = net
 
                 # video input with n_obs_steps timesteps
+                # 视频输入包含 n_obs_steps 个时间步
                 shape = (n_obs_steps,) + shape
                 # compute output shape
+                # 计算输出形状
                 output_shape = get_output_shape(shape, net)
                 assert(len(output_shape) == 1)
                 rgb_feature_dims.append(output_shape[0])
@@ -74,16 +78,20 @@ class DiffusionUnetVideoPolicy(BaseImagePolicy):
         # the order decides concatenation order
         # dict preserves insertion order
         # rgb and then lowdim
+        # 顺序决定了拼接顺序，字典保留插入顺序
+        # 先 RGB 后 lowdim
         self.rgb_nets_map = rgb_nets_map
         self.lowdim_keys = lowdim_keys
         self.lowdim_net = None
 
         # compute dimensions for diffusion
+        # 计算扩散模型的输入维度
         rgb_feature_dim = sum(rgb_feature_dims)
         lowdim_input_dim = sum(lowdim_input_dims)
         global_cond_dim = rgb_feature_dim
         input_dim = action_dim
         if lowdim_as_global_cond:
+            # 如果低维观测作为全局条件，使用 TemporalAggregator 聚合时间步信息
             lowdim_net = TemporalAggregator(
                 in_channels=lowdim_input_dim,
                 channel_mults=channel_mults,
@@ -97,6 +105,7 @@ class DiffusionUnetVideoPolicy(BaseImagePolicy):
             assert len(lowdim_feature_shape) == 1
             global_cond_dim += lowdim_feature_shape[0]
         else:
+            # 否则将低维观测拼接到输入轨迹中 (inpainting 方式)
             input_dim += lowdim_input_dim
 
         model = ConditionalUnet1D(
@@ -154,6 +163,7 @@ class DiffusionUnetVideoPolicy(BaseImagePolicy):
 
         for t in scheduler.timesteps:
             # 1. apply conditioning
+            # 1. 应用条件约束 (Inpainting)
             trajectory[condition_mask] = condition_data[condition_mask]
 
             # 2. predict model output
@@ -161,6 +171,7 @@ class DiffusionUnetVideoPolicy(BaseImagePolicy):
                 local_cond=local_cond, global_cond=global_cond)
 
             # 3. compute previous image: x_t -> x_t-1
+            # 3. 计算上一时刻采样：x_t -> x_{t-1}
             trajectory = scheduler.step(
                 model_output, t, trajectory, 
                 generator=generator,
@@ -168,6 +179,7 @@ class DiffusionUnetVideoPolicy(BaseImagePolicy):
                 ).prev_sample
         
         # finally make sure conditioning is enforced
+        # 最后确保条件严格生效
         trajectory[condition_mask] = condition_data[condition_mask]        
 
         return trajectory
@@ -180,6 +192,7 @@ class DiffusionUnetVideoPolicy(BaseImagePolicy):
         """
         assert 'past_action' not in obs_dict # not implemented yet
         # normalize input
+        # 归一化输入观测
         nobs = self.normalizer.normalize(obs_dict)
         value = next(iter(nobs.values()))
         B, To = value.shape[:2]
@@ -187,11 +200,12 @@ class DiffusionUnetVideoPolicy(BaseImagePolicy):
         Da = self.action_dim
         To = self.n_obs_steps
 
-        # build input
+        # build inputf
         device = self.device
         dtype = self.dtype
 
         # run encoder first
+        # 先运行编码器提取特征
         # python 3.6+ dict preserves order
         rgb_features_map = dict()
         for key, net in self.rgb_nets_map.items():
@@ -201,16 +215,20 @@ class DiffusionUnetVideoPolicy(BaseImagePolicy):
         lowdim_input = torch.cat([nobs[k] for k in self.lowdim_keys], dim=-1)
 
         # handle different ways of passing lowdim
+        # 处理低维数据的不同传递方式 (全局条件 vs Inpainting)
         global_cond = None
         cond_data = None
         cond_mask = None
         if self.lowdim_as_global_cond:
+            # 低维特征作为全局条件
             lowdim_feature = self.lowdim_net(lowdim_input[:,:To])
             global_cond = torch.cat([rgb_feature, lowdim_feature], dim=-1)
             # empty data for action
+            # 动作部分为空，由模型生成
             cond_data = torch.zeros(size=(B, T, Da), device=device, dtype=dtype)
             cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
         else:
+            # 低维特征作为 Inpainting 条件
             global_cond = rgb_feature
             cond_data = torch.zeros(size=(B, T, Da+self.lowdim_input_dim), device=device, dtype=dtype)
             cond_mask = torch.zeros_like(cond_data, dtype=torch.bool)
@@ -218,6 +236,7 @@ class DiffusionUnetVideoPolicy(BaseImagePolicy):
             cond_mask[:,:To,Da:] = True
 
         # run sampling
+        # 执行扩散采样
         nsample = self.conditional_sample(
             cond_data, 
             cond_mask,
@@ -226,10 +245,12 @@ class DiffusionUnetVideoPolicy(BaseImagePolicy):
             **self.kwargs)
         
         # unnormalize prediction
+        # 反归一化预测结果
         naction_pred = nsample[...,:Da]
         action_pred = self.normalizer['action'].unnormalize(naction_pred)
 
         # get action
+        # 获取动作
         start = To
         end = start + self.n_action_steps
         action = action_pred[:,start:end]
@@ -246,11 +267,13 @@ class DiffusionUnetVideoPolicy(BaseImagePolicy):
 
     def compute_loss(self, batch):
         # normalize input
+        # 归一化输入 batch
         assert 'valid_mask' not in batch
         nobs = self.normalizer.normalize(batch['obs'])
         nactions = self.normalizer['action'].normalize(batch['action'])
 
         # run encoder first
+        # 提取图像特征
         # python 3.6+ dict preserves order
         rgb_features_map = dict()
         for key, net in self.rgb_nets_map.items():
@@ -260,42 +283,52 @@ class DiffusionUnetVideoPolicy(BaseImagePolicy):
         lowdim_input = torch.cat([nobs[k] for k in self.lowdim_keys], axis=-1)
         
         # handle different ways of passing lowdim
+        # 构建训练轨迹和条件
         global_cond = None
         trajectory = None
         cond_data = None
         if self.lowdim_as_global_cond:
+            # 低维特征作为全局条件
             lowdim_feature = self.lowdim_net(lowdim_input[:,:self.n_obs_steps])
             global_cond = torch.cat([rgb_feature, lowdim_feature], dim=-1)
             trajectory = nactions
             cond_data = nactions
         else:
+            # 低维特征作为 Inpainting 条件，拼接到轨迹中
             global_cond = rgb_feature
             trajectory = torch.cat([nactions, lowdim_input], dim=-1)
             cond_data = trajectory
 
         # generate impainting mask
+        # 生成掩码 (用于 inpainting 训练)
         condition_mask = self.mask_generator(trajectory.shape)
 
         # Sample noise that we'll add to the images
+        # 采样噪声
         noise = torch.randn(trajectory.shape, device=trajectory.device)
         bsz = trajectory.shape[0]
         # Sample a random timestep for each image
+        # 为每个样本采样一个随机时间步
         timesteps = torch.randint(
             0, self.noise_scheduler.config.num_train_timesteps, 
             (bsz,), device=trajectory.device
         ).long()
         # Add noise to the clean images according to the noise magnitude at each timestep
         # (this is the forward diffusion process)
+        # 根据时间步的噪声幅度向干净轨迹添加噪声 (前向扩散过程)
         noisy_trajectory = self.noise_scheduler.add_noise(
             trajectory, noise, timesteps)
         
         # compute loss mask
+        # 计算损失掩码
         loss_mask = ~condition_mask
 
         # apply conditioning
+        # 应用条件约束
         noisy_trajectory[condition_mask] = cond_data[condition_mask]
         
         # Predict the noise residual
+        # 预测噪声残差
         pred = self.model(noisy_trajectory, timesteps, 
             local_cond=None, global_cond=global_cond)
 

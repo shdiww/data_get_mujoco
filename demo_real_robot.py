@@ -45,27 +45,22 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
                 output_dir=output, 
                 robot_ip=robot_ip, 
                 # recording resolution
-                # 录制分辨率
                 obs_image_resolution=(1280,720),
                 frequency=frequency,
                 init_joints=init_joints,
                 enable_multi_cam_vis=True,
                 record_raw_video=True,
                 # number of threads per camera view for video recording (H.264)
-                # 每个相机视图用于视频录制的线程数 (H.264)
                 thread_per_video=3,
                 # video recording quality, lower is better (but slower).
-                # 视频录制质量，越低越好（但越慢）
                 video_crf=21,
                 shm_manager=shm_manager
             ) as env:
             cv2.setNumThreads(1)
 
             # realsense exposure
-            # 设置 RealSense 曝光
             env.realsense.set_exposure(exposure=120, gain=0)
             # realsense white balance
-            # 设置 RealSense 白平衡
             env.realsense.set_white_balance(white_balance=5900)
 
             time.sleep(1.0)
@@ -78,40 +73,33 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
             is_recording = False
             while not stop:
                 # calculate timing
-                # 计算时间
                 t_cycle_end = t_start + (iter_idx + 1) * dt
                 t_sample = t_cycle_end - command_latency
                 t_command_target = t_cycle_end + dt
 
                 # pump obs
-                # 获取观测数据
                 obs = env.get_obs()
 
                 # handle key presses
-                # 处理按键事件
                 press_events = key_counter.get_press_events()
                 for key_stroke in press_events:
                     if key_stroke == KeyCode(char='q'):
                         # Exit program
-                        # 退出程序
                         stop = True
                     elif key_stroke == KeyCode(char='c'):
                         # Start recording
-                        # 开始录制
                         env.start_episode(t_start + (iter_idx + 2) * dt - time.monotonic() + time.time())
                         key_counter.clear()
                         is_recording = True
                         print('Recording!')
                     elif key_stroke == KeyCode(char='s'):
                         # Stop recording
-                        # 停止录制
                         env.end_episode()
                         key_counter.clear()
                         is_recording = False
                         print('Stopped.')
                     elif key_stroke == Key.backspace:
                         # Delete the most recent recorded episode
-                        # 删除最近录制的一条 episode
                         if click.confirm('Are you sure to drop an episode?'):
                             env.drop_episode()
                             key_counter.clear()
@@ -120,7 +108,6 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
                 stage = key_counter[Key.space]
 
                 # visualize
-                # 可视化
                 vis_img = obs[f'camera_{vis_camera_idx}'][-1,:,:,::-1].copy()
                 episode_id = env.replay_buffer.n_episodes
                 text = f'Episode: {episode_id}, Stage: {stage}'
@@ -141,7 +128,6 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
 
                 precise_wait(t_sample)
                 # get teleop command
-                # 获取遥操作命令 (SpaceMouse)
                 sm_state = sm.get_motion_state_transformed()
                 # print(sm_state)
                 dpos = sm_state[:3] * (env.max_pos_speed / frequency)
@@ -149,14 +135,11 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
                 
                 if not sm.is_button_pressed(0):
                     # translation mode
-                    # 平移模式 (未按下左键)
                     drot_xyz[:] = 0
                 else:
-                    # 旋转模式 (按下左键)
                     dpos[:] = 0
                 if not sm.is_button_pressed(1):
                     # 2D translation mode
-                    # 2D 平移模式 (未按下右键，锁定 Z 轴)
                     dpos[2] = 0    
 
                 drot = st.Rotation.from_euler('xyz', drot_xyz)
@@ -165,7 +148,6 @@ def main(output, robot_ip, vis_camera_idx, init_joints, frequency, command_laten
                     target_pose[3:])).as_rotvec()
 
                 # execute teleop command
-                # 执行遥操作命令
                 env.exec_actions(
                     actions=[target_pose], 
                     timestamps=[t_command_target-time.monotonic()+time.time()],

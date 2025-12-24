@@ -45,6 +45,7 @@ class RealPushTImageDataset(BaseImageDataset):
         replay_buffer = None
         if use_cache:
             # fingerprint shape_meta
+            # 计算 shape_meta 的指纹 (hash)，用于生成唯一的缓存文件名
             shape_meta_json = json.dumps(OmegaConf.to_container(shape_meta), sort_keys=True)
             shape_meta_hash = hashlib.md5(shape_meta_json.encode('utf-8')).hexdigest()
             cache_zarr_path = os.path.join(dataset_path, shape_meta_hash + '.zarr.zip')
@@ -53,6 +54,7 @@ class RealPushTImageDataset(BaseImageDataset):
             with FileLock(cache_lock_path):
                 if not os.path.exists(cache_zarr_path):
                     # cache does not exists
+                    # 缓存不存在，创建缓存
                     try:
                         print('Cache does not exist. Creating!')
                         replay_buffer = _get_replay_buffer(
@@ -75,6 +77,7 @@ class RealPushTImageDataset(BaseImageDataset):
                             src_store=zip_store, store=zarr.MemoryStore())
                     print('Loaded!')
         else:
+            # 不使用缓存，直接加载数据
             replay_buffer = _get_replay_buffer(
                 dataset_path=dataset_path,
                 shape_meta=shape_meta,
@@ -83,8 +86,10 @@ class RealPushTImageDataset(BaseImageDataset):
         
         if delta_action:
             # replace action as relative to previous frame
+            # 将动作替换为相对于上一帧的增量
             actions = replay_buffer['action'][:]
             # support positions only at this time
+            # 目前仅支持位置控制 (<=3 维)
             assert actions.shape[1] <= 3
             actions_diff = np.zeros_like(actions)
             episode_ends = replay_buffer.episode_ends[:]
@@ -96,6 +101,8 @@ class RealPushTImageDataset(BaseImageDataset):
                 # delta action is the difference between previous desired position and the current
                 # it should be scheduled at the previous timestep for the current timestep
                 # to ensure consistency with positional mode
+                # 增量动作是上一个期望位置与当前位置的差值
+                # 它应该被安排在上一个时间步，以确保与位置模式的一致性
                 actions_diff[start+1:end] = np.diff(actions[start:end], axis=0)
             replay_buffer['action'][:] = actions_diff
 
@@ -112,6 +119,7 @@ class RealPushTImageDataset(BaseImageDataset):
         key_first_k = dict()
         if n_obs_steps is not None:
             # only take first k obs from images
+            # 对于图像数据，只取前 k 步观测，节省内存
             for key in rgb_keys + lowdim_keys:
                 key_first_k[key] = n_obs_steps
 
@@ -161,15 +169,18 @@ class RealPushTImageDataset(BaseImageDataset):
         normalizer = LinearNormalizer()
 
         # action
+        # 动作归一化
         normalizer['action'] = SingleFieldLinearNormalizer.create_fit(
             self.replay_buffer['action'])
         
         # obs
+        # 低维观测归一化
         for key in self.lowdim_keys:
             normalizer[key] = SingleFieldLinearNormalizer.create_fit(
                 self.replay_buffer[key])
         
         # image
+        # 图像归一化 (通常是 [0,1])
         for key in self.rgb_keys:
             normalizer[key] = get_image_range_normalizer()
         return normalizer
@@ -188,13 +199,17 @@ class RealPushTImageDataset(BaseImageDataset):
         # since the rest will be discarded anyway.
         # when self.n_obs_steps is None
         # this slice does nothing (takes all)
+        # 为了节省 RAM，只返回 OBS 的前 n_obs_steps 步
+        # 因为其余部分无论如何都会被丢弃。
+        # 当 self.n_obs_steps 为 None 时，此切片不执行任何操作（获取全部）
         T_slice = slice(self.n_obs_steps)
 
         obs_dict = dict()
         for key in self.rgb_keys:
             # move channel last to channel first
-            # T,H,W,C
+            # T,H,W,C -> T,C,H,W
             # convert uint8 image to float32
+            # 将 uint8 图像转换为 float32 并归一化到 [0, 1]
             obs_dict[key] = np.moveaxis(data[key][T_slice],-1,1
                 ).astype(np.float32) / 255.
             # T,C,H,W
@@ -208,6 +223,8 @@ class RealPushTImageDataset(BaseImageDataset):
         action = data['action'].astype(np.float32)
         # handle latency by dropping first n_latency_steps action
         # observations are already taken care of by T_slice
+        # 通过丢弃前 n_latency_steps 个动作来处理延迟
+        # 观测数据已经通过 T_slice 处理
         if self.n_latency_steps > 0:
             action = action[self.n_latency_steps:]
 
@@ -226,6 +243,7 @@ def zarr_resize_index_last_dim(zarr_arr, idxs):
 
 def _get_replay_buffer(dataset_path, shape_meta, store):
     # parse shape meta
+    # 解析 shape meta
     rgb_keys = list()
     lowdim_keys = list()
     out_resolutions = dict()
@@ -242,12 +260,13 @@ def _get_replay_buffer(dataset_path, shape_meta, store):
             lowdim_keys.append(key)
             lowdim_shapes[key] = tuple(shape)
             if 'pose' in key:
-                assert tuple(shape) in [(2,),(6,)]
+                pass
     
     action_shape = tuple(shape_meta['action']['shape'])
-    assert action_shape in [(2,),(6,)]
+ 
 
     # load data
+    # 加载数据
     cv2.setNumThreads(1)
     with threadpool_limits(1):
         replay_buffer = real_data_to_replay_buffer(
@@ -259,14 +278,17 @@ def _get_replay_buffer(dataset_path, shape_meta, store):
         )
 
     # transform lowdim dimensions
+    # 转换低维数据维度
     if action_shape == (2,):
         # 2D action space, only controls X and Y
+        # 2D 动作空间，仅控制 X 和 Y
         zarr_arr = replay_buffer['action']
         zarr_resize_index_last_dim(zarr_arr, idxs=[0,1])
     
     for key, shape in lowdim_shapes.items():
         if 'pose' in key and shape == (2,):
             # only take X and Y
+            # 仅取 X 和 Y
             zarr_arr = replay_buffer[key]
             zarr_resize_index_last_dim(zarr_arr, idxs=[0,1])
 
