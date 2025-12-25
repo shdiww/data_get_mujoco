@@ -55,7 +55,7 @@ def main():
     episode_low_dim = {
         'state': [],
         'action': [],
-        'timestamp': []
+        'timestep': []
     }
 
     # 初始化视频录制器
@@ -69,7 +69,7 @@ def main():
         # 重置缓存
         episode_low_dim['state'] = []
         episode_low_dim['action'] = []
-        episode_low_dim['timestamp'] = []
+        episode_low_dim['timestep'] = []
         
         # 准备视频录制
         episode_idx = replay_buffer.n_episodes
@@ -81,19 +81,19 @@ def main():
         print(f"\n[录制] 停止。")
 
         # 检查数据长度，如果太短则不保存
-        if save and len(episode_low_dim['timestamp']) <= 10:
+        if save and len(episode_low_dim['timestep']) <= 10:
             print("回合太短，已丢弃。")
             save = False
 
         recorder.stop_recording(save=save)
 
         if save:
-            print(f"正在保存 {len(episode_low_dim['timestamp'])} 步数据...")
+            print(f"正在保存 {len(episode_low_dim['timestep'])} 步数据...")
             
             data = {
                 'state': np.array(episode_low_dim['state'], dtype=np.float32),
                 'action': np.array(episode_low_dim['action'], dtype=np.float32),
-                'timestamp': np.array(episode_low_dim['timestamp'], dtype=np.float64)
+                'timestep': np.array(episode_low_dim['timestep'], dtype=np.float64)
             }
             
             replay_buffer.add_episode(data, compressors='disk')
@@ -160,7 +160,7 @@ def main():
 
                 episode_low_dim['state'].append(state_7d)
                 episode_low_dim['action'].append(action_7d)
-                episode_low_dim['timestamp'].append(time.time())
+                episode_low_dim['timestep'].append(time.time())
 
             obs = env.step(gripper_target)
 

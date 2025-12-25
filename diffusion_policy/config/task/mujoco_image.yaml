@@ -1,7 +1,7 @@
 name: mujoco_image
 
 image_shape: [3, 640, 480]
-dataset_path: data/mujoco_data/data
+dataset_path: data/mujoco_demo
 
 shape_meta: &shape_meta
   # acceptable types: rgb, low_dim

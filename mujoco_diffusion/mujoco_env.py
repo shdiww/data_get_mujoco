@@ -209,7 +209,7 @@ class MujocoEnv:
             'qpos': qpos,
             'qvel': qvel,
             'images': images,
-            'timestamp': time.time(),
+            'timestep': time.time(),
             'robot_eef_pose': state
         }
 

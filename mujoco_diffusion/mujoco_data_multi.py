@@ -21,7 +21,7 @@ class MujocoDataMulti:
         self.episode_low_dim = {
             'state': [],
             'action': [],
-            'timestamp': []
+            'timestep': []
         }
 
     def start_episode(self):
@@ -32,7 +32,7 @@ class MujocoDataMulti:
         # 1. 重置低维数据缓存
         self.episode_low_dim['state'] = []
         self.episode_low_dim['action'] = []
-        self.episode_low_dim['timestamp'] = []
+        self.episode_low_dim['timestep'] = []
         
         # 2. 启动视频录制 (传入当前的 episode index)
         episode_idx = self.replay_buffer.n_episodes
@@ -53,13 +53,13 @@ class MujocoDataMulti:
 
         # 3. 保存低维数据到 Zarr
         if save:
-            print(f"正在保存 {len(self.episode_low_dim['timestamp'])} 步数据...")
+            print(f"正在保存 {len(self.episode_low_dim['timestep'])} 步数据...")
             
             # 构造符合 ReplayBuffer 要求的数据字典
             data = {
                 'state': np.array(self.episode_low_dim['state'], dtype=np.float32),
                 'action': np.array(self.episode_low_dim['action'], dtype=np.float32),
-                'timestamp': np.array(self.episode_low_dim['timestamp'], dtype=np.float64)
+                'timestep': np.array(self.episode_low_dim['timestep'], dtype=np.float64)
             }
             
             try:
@@ -74,6 +74,6 @@ class MujocoDataMulti:
 
         self.episode_low_dim['state'].append(state)
         self.episode_low_dim['action'].append(action)
-        self.episode_low_dim['timestamp'].append(timestamp)
+        self.episode_low_dim['timestep'].append(timestamp)
         
         self.recorder.write_frame(images)
