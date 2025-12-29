@@ -10,6 +10,7 @@ from collections import deque
 from scipy.spatial.transform import Rotation as R
 from omegaconf import OmegaConf
 from mujoco_diffusion.mujoco_env import MujocoEnv
+import mujoco
 from diffusion_policy.common.pytorch_util import dict_apply
 
 # 注册 eval 解析器 (配置文件中可能用到)
@@ -33,12 +34,16 @@ def main(checkpoint, device):
     # 使用 30Hz 以匹配数据采集频率
     env = MujocoEnv(xml_path, camera_names=camera_names, frequency=30)
     
+    # 获取对象 ID 用于评分
+    red_box_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, "red_box")
+    target_zone_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, "target_zone")
+
     # -------------------------------------------------------------------------
     # 2. 推理变量初始化
     # -------------------------------------------------------------------------
     policy = None
     cfg = None
-    n_obs_steps = 2 # 默认值，加载模型后会更新
+    n_obs_steps = 1 # 默认值，加载模型后会更新
     obs_history = deque(maxlen=n_obs_steps)
     
     running = False
@@ -53,6 +58,23 @@ def main(checkpoint, device):
     # 重置环境获取初始观测
     obs = env.reset()
     
+    def get_score():
+        # 获取位置
+        box_pos = env.data.xpos[red_box_id]
+        zone_pos = env.data.xpos[target_zone_id]
+        
+        # 计算 XY 平面距离
+        xy_dist = np.linalg.norm(box_pos[:2] - zone_pos[:2])
+        
+        # 评分规则:
+        # 距离分: 距离 < 0.01 满分, > 0.2 零分
+        dist_score = np.clip(1.0 - (xy_dist - 0.01) / (0.2 - 0.01), 0.0, 1.0)
+        
+        # 高度分: > 0.05 满分
+        height_score = 1.0 if box_pos[2] > 0.05 else 0.0
+        
+        return (dist_score + height_score) / 2.0, xy_dist, box_pos[2]
+
     # 主循环
     while not glfw.window_should_close(env.window):
         # ---------------------------------------------------------------------
@@ -62,10 +84,14 @@ def main(checkpoint, device):
         img = obs['images']['overview'] # RGB
         img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         
+        # 计算当前分数
+        score, dist, height = get_score()
+
         # 叠加状态文本
         status = "Policy Control" if running else "Idle (Press 's' to start)"
         color = (0, 255, 0) if running else (0, 0, 255)
         cv2.putText(img_bgr, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+        cv2.putText(img_bgr, f"Score: {score:.2f} (Dist: {dist:.3f}, H: {height:.3f})", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         
         cv2.imshow("MuJoCo Eval", img_bgr)
         key = cv2.waitKey(1)
