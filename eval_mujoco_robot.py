@@ -204,7 +204,8 @@ def main(checkpoint, device):
                 result = policy.predict_action(obs_dict)
                 # result['action'] 形状为 (B, T_pred, D_action)
                 # 我们取第一个 batch
-                action = result['action'][0].detach().cpu().numpy()
+                action = result['actio' \
+                'n'][0].detach().cpu().numpy()
             
             # 4. 执行动作
             # 我们执行预测序列中的第一个动作 (闭环控制)
@@ -212,7 +213,7 @@ def main(checkpoint, device):
             
             target_pos = target_action[:3]
             target_rotvec = target_action[3:6]
-            target_gripper = target_action[6]
+            target_gripper = target_action[6] 
             
             # 更新 Mocap 位置
             env.data.mocap_pos[0] = target_pos

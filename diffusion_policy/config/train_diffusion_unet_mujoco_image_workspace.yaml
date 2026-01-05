@@ -42,12 +42,12 @@ policy:
     rgb_model:
       _target_: diffusion_policy.model.vision.model_getter.get_resnet
       name: resnet18
-      weights: null
+      weights: IMAGENET1K_V1
     resize_shape: [320, 240]
     crop_shape: [288, 216] # ch, cw 240x320 90%
-    random_crop: True
-    use_group_norm: True
-    share_rgb_model: False
+    random_crop: False
+    use_group_norm: False
+    share_rgb_model: True
     imagenet_norm: True
 
   horizon: ${horizon}
