@@ -13,6 +13,9 @@ from omegaconf import OmegaConf
 from mujoco_diffusion.mujoco_env import MujocoEnv
 import mujoco
 from diffusion_policy.common.pytorch_util import dict_apply
+import torchvision.transforms as transforms
+import torchvision
+from diffusion_policy.model.vision.crop_randomizer import CropRandomizer
 
 # 注册 eval 解析器 (配置文件中可能用到)
 OmegaConf.register_new_resolver("eval", eval, replace=True)
@@ -23,6 +26,13 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 @click.option('-f', '--frequency', default=30, type=int, help='Control frequency (Hz)')
 def main(checkpoint, device, frequency):
     # -------------------------------------------------------------------------
+    # 0. 预加载配置 (为了获取正确的环境分辨率)
+    # -------------------------------------------------------------------------
+    print(f"正在预加载 Config 从 {checkpoint} ...")
+    payload = torch.load(open(checkpoint, 'rb'), pickle_module=dill)
+    cfg = payload['cfg']
+
+    # -------------------------------------------------------------------------
     # 1. 环境设置
     # -------------------------------------------------------------------------
     # MuJoCo XML 模型路径 (与 collect_data_sim.py 保持一致)
@@ -32,9 +42,16 @@ def main(checkpoint, device, frequency):
     # 假设 camera_0 -> overview, camera_1 -> hand_camera
     camera_names = ["overview", "hand_camera"]
     
+    # [Fix] 从 Config 获取正确的分辨率
+    # cfg.task.image_shape 是 [C, H, W] -> [3, 640, 480] (Portrait)
+    # MuJoCo 默认可能是 Landscape (640, 480)，导致宽高比不匹配 (Aspect Ratio Trap)
+    target_h = cfg.task.image_shape[1]
+    target_w = cfg.task.image_shape[2]
+    print(f"[Fix] 强制设置 MuJoCo 渲染分辨率: W={target_w}, H={target_h}")
+
     # 初始化 MuJoCo 环境
     # 使用 30Hz 以匹配数据采集频率
-    env = MujocoEnv(xml_path, camera_names=camera_names, frequency=frequency)
+    env = MujocoEnv(xml_path, camera_names=camera_names, frequency=frequency, obs_resolution=(target_w, target_h))
     
     # 获取对象 ID 用于评分
     red_box_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, "red_box")
@@ -44,7 +61,7 @@ def main(checkpoint, device, frequency):
     # 2. 推理变量初始化
     # -------------------------------------------------------------------------
     policy = None
-    cfg = None
+    # cfg = None # Already loaded
     n_obs_steps = 1 # 默认值，加载模型后会更新
     obs_history = deque(maxlen=n_obs_steps)
     
@@ -78,8 +95,15 @@ def main(checkpoint, device, frequency):
         return (dist_score + height_score) / 2.0, xy_dist, box_pos[2]
 
     # 主循环
+    last_loop_time = time.time()
     while not glfw.window_should_close(env.window):
         start_time = time.time()
+        
+        # 计算实际循环频率 (Real FPS)
+        loop_dt = start_time - last_loop_time
+        actual_fps = 1.0 / loop_dt if loop_dt > 0 else 0.0
+        last_loop_time = start_time
+
         # ---------------------------------------------------------------------
         # 可视化与交互
         # ---------------------------------------------------------------------
@@ -94,7 +118,7 @@ def main(checkpoint, device, frequency):
         status = "Policy Control" if running else "Idle (Press 's' to start)"
         color = (0, 255, 0) if running else (0, 0, 255)
         cv2.putText(img_bgr, status, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-        cv2.putText(img_bgr, f"Score: {score:.2f} (Dist: {dist:.3f}, H: {height:.3f})", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        cv2.putText(img_bgr, f"Score: {score:.2f} | FPS: {actual_fps:.1f}/{env.frequency}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         
         cv2.imshow("MuJoCo Eval", img_bgr)
         key = cv2.waitKey(1)
@@ -105,11 +129,10 @@ def main(checkpoint, device, frequency):
             # -----------------------------------------------------------------
             # 加载模型 (按 's' 触发)
             # -----------------------------------------------------------------
-            print(f"正在从 {checkpoint} 加载模型...")
+            print(f"正在实例化模型...")
             try:
-                # 加载 payload
-                payload = torch.load(open(checkpoint, 'rb'), pickle_module=dill)
-                cfg = payload['cfg']
+                # payload 和 cfg 已经在开头加载了，无需重复加载
+                # payload = torch.load(open(checkpoint, 'rb'), pickle_module=dill)
                 
                 # 实例化 workspace 和 policy
                 cls = hydra.utils.get_class(cfg._target_)
@@ -124,6 +147,17 @@ def main(checkpoint, device, frequency):
                 policy.to(device)
                 policy.eval()
                 
+                # [FIX] Patch CropRandomizer -> CenterCrop
+                # 强制模型在推理时使用中心裁剪，消除 RandomCrop 带来的系统性偏差 (Systematic Bias)
+                # 同时保持输入形状与 shape_meta 一致，避免 assert 错误
+                if hasattr(policy, 'obs_encoder'):
+                    for key, transform in policy.obs_encoder.key_transform_map.items():
+                        if isinstance(transform, torch.nn.Sequential):
+                            for i, mod in enumerate(transform):
+                                if isinstance(mod, CropRandomizer):
+                                    print(f"[Patch] Replacing CropRandomizer with CenterCrop for {key}")
+                                    transform[i] = transforms.CenterCrop((mod.crop_height, mod.crop_width))
+
                 # 更新观测参数
                 n_obs_steps = cfg.n_obs_steps
                 obs_history = deque(maxlen=n_obs_steps)
@@ -149,15 +183,30 @@ def main(checkpoint, device, frequency):
             # 构造当前步的字典，需匹配 shape_meta
             current_step = {}
             
-            # 图像: HWC -> 稍后转换为 BCHW
-            # 根据模型配置调整图像尺寸
-            h, w = cfg.task.shape_meta.obs.camera_0.shape[1:]
+            # 1. Resize 到 shape_meta 定义的尺寸 (模型期望的输入尺寸)
+            c, h_in, w_in = cfg.task.shape_meta.obs.camera_0.shape
             img_overview = obs['images']['overview']
-            current_step['camera_0'] = cv2.resize(img_overview, (w, h), interpolation=cv2.INTER_AREA)
+            
+            # # [DEBUG] 终极 Debug: 保存原始图像
+            # # 检查点: 1. Shape 是否为 (480, 640, 3)? 2. 内容是否为全局视角?
+            # if not hasattr(policy, 'debug_raw_saved'):
+            #     policy.debug_raw_saved = True
+            #     print(f"Raw Image Shape: {img_overview.shape}")
+            #     cv2.imwrite("debug_raw_overview.png", cv2.cvtColor(img_overview, cv2.COLOR_RGB2BGR))
 
-            h, w = cfg.task.shape_meta.obs.camera_1.shape[1:]
+            current_step['camera_0'] = cv2.resize(img_overview, (w_in, h_in), interpolation=cv2.INTER_AREA)
+
+            c, h_in, w_in = cfg.task.shape_meta.obs.camera_1.shape
             img_hand = obs['images']['hand_camera']
-            current_step['camera_1'] = cv2.resize(img_hand, (w, h), interpolation=cv2.INTER_AREA)
+            
+            # [DEBUG] 终极 Debug: 保存原始图像
+            # 检查点: 1. Shape 是否为 (480, 640, 3)? 2. 内容是否为全局视角?
+            if not hasattr(policy, 'debug_raw_saved'):
+                policy.debug_raw_saved = True
+                print(f"Raw Image Shape: {img_hand.shape}")
+                cv2.imwrite("debug_raw_hand.png", cv2.cvtColor(img_hand, cv2.COLOR_RGB2BGR))
+
+            current_step['camera_1'] = cv2.resize(img_hand, (w_in, h_in), interpolation=cv2.INTER_AREA)
             
             # 状态: 7D (eef_pos + eef_rotvec + gripper_width)
             eef_pos = obs['robot_eef_pose'][:3]
@@ -204,6 +253,39 @@ def main(checkpoint, device, frequency):
             
             # 3. 预测动作
             with torch.no_grad():
+                # [DEBUG] Step 1: 保存模型看到的图像 (用于验证 Crop 是否正确)
+                # 这张图展示了进入 ResNet 之前的真实像素，包含了 Resize 和 Crop 的结果
+                if not hasattr(policy, 'debug_saved'):
+                    policy.debug_saved = True
+                    print("[DEBUG] 正在保存推理视图 (debug_inference_view.png)...")
+                    try:
+                        # 遍历所有相机 (camera_0, camera_1)
+                        for cam_name in ['camera_0', 'camera_1']:
+                            if hasattr(policy, 'obs_encoder') and cam_name in policy.obs_encoder.key_transform_map:
+                                transform = policy.obs_encoder.key_transform_map[cam_name]
+                                # 取第一帧 (B=1, T, C, H, W) -> (C, H, W)
+                                img_tensor = obs_dict[cam_name][0, 0] 
+                                # 增加 Batch 维以便 transform 处理: (1, C, H, W)
+                                img_tensor = img_tensor.unsqueeze(0)
+                                
+                                # 应用变换，但在 Normalize 之前停止 (为了看到原始像素)
+                                debug_img = img_tensor
+                                if isinstance(transform, torch.nn.Sequential):
+                                    for module in transform:
+                                        if isinstance(module, torchvision.transforms.Normalize):
+                                            break
+                                        debug_img = module(debug_img)
+                                
+                                # 转回 numpy 图片: (1, C, H, W) -> (H, W, C)
+                                debug_img_np = debug_img[0].cpu().numpy().transpose(1, 2, 0)
+                                debug_img_np = (np.clip(debug_img_np, 0, 1) * 255).astype(np.uint8)
+                                debug_img_bgr = cv2.cvtColor(debug_img_np, cv2.COLOR_RGB2BGR)
+                                filename = f"debug_inference_view_{cam_name}.png"
+                                cv2.imwrite(filename, debug_img_bgr)
+                                print(f"[DEBUG] 已保存 '{filename}'. Shape: {debug_img_np.shape}")
+                    except Exception as e:
+                        print(f"[DEBUG] 保存调试图像失败: {e}")
+
                 result = policy.predict_action(obs_dict)
                 # result['action'] 形状为 (B, T_pred, D_action)
                 # 我们取第一个 batch

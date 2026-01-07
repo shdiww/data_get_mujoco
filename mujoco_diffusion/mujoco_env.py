@@ -15,7 +15,7 @@ class MujocoEnv:
     3. 执行动作 (替代机器人控制器)
     4. 获取状态 (替代机器人反馈)
     """
-    def __init__(self, xml_path, camera_names=None, frequency=30, obs_resolution=(640, 480)):
+    def __init__(self, xml_path, camera_names=None, frequency=30, obs_resolution=(640, 480), ik_iterations=10):
         """
         Args:
             xml_path (str): MuJoCo xml 文件路径
@@ -29,6 +29,7 @@ class MujocoEnv:
         self.camera_names = camera_names
         self.frequency = frequency
         self.dt = 1.0 / frequency
+        self.ik_iterations = ik_iterations
 
         # 1. 加载 MuJoCo 模型和数据
         try:
@@ -136,13 +137,17 @@ class MujocoEnv:
         """
         gripper_target = action
 
+        # [新增] 在计算 IK 前，将运动学模型的配置同步为当前的物理状态
+        # 这能消除因重力下垂(Gravity Sag)或物理误差导致的静差，实现闭环控制
+        self.configuration.update(self.data.qpos)
+
         # --- Mink IK 求解循环 ---
         # 获取 Mocap "target" 的位姿作为 IK 目标
         T_wt = mink.SE3.from_mocap_name(self.model, self.data, "target")
         self.end_effector_task.set_target(T_wt)
         
         # 在一个控制周期内多次迭代 IK 以逼近目标
-        for _ in range(10): # 迭代次数可调
+        for _ in range(self.ik_iterations): # 迭代次数可调
             vel = mink.solve_ik(
                 self.configuration, 
                 self.tasks, 

@@ -12,9 +12,14 @@ from mujoco_diffusion.video_recorder import VideoRecorder
 
 def main():
     # 配置
+    # [修改] 将采集频率设置为 10Hz，与你的评估频率保持一致
+    FREQUENCY = 10
     xml_path = "/home/blzgz/data_get_mujoco/model/franka_emika_panda/mjx_scene.xml"
     # 根据 XML 文件修改相机名称: "overview" (场景相机) 和 "hand_camera" (手眼相机)
     camera_names = ["overview", "hand_camera"]
+    
+    print(f"XML Path: {xml_path}")
+    print("!!! 警告: 请确保此 XML 文件与 eval_mujoco_robot.py 完全一致，且在采集/训练/推理全过程中不再修改任何几何参数 !!!")
     
     # 数据集根目录
     dataset_root = pathlib.Path("data/mujoco_demo")
@@ -25,7 +30,8 @@ def main():
     video_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. 初始化环境 (替代 RealEnv)
-    env = MujocoEnv(xml_path, camera_names=camera_names, frequency=30)
+    # [修改] 使用定义的频率，并增加 IK 迭代次数(ik_iterations=20)以保证大步长下的解算精度
+    env = MujocoEnv(xml_path, camera_names=camera_names, frequency=FREQUENCY, ik_iterations=20)
     
     # 2. 初始化手柄 (替代 SpaceMouse)
     # max_pos_speed: m/s, max_rot_speed: rad/s
@@ -59,7 +65,8 @@ def main():
     }
 
     # 初始化视频录制器
-    recorder = VideoRecorder(video_dir, camera_names, fps=30.0, resolution=(env.obs_width, env.obs_height))
+    # [修改] 视频 FPS 也需要同步修改，否则录制的视频回放速度会不对
+    recorder = VideoRecorder(video_dir, camera_names, fps=float(FREQUENCY), resolution=(env.obs_width, env.obs_height))
 
     def start_recording():
         nonlocal is_recording, episode_low_dim
