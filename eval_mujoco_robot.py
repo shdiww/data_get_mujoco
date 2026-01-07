@@ -127,11 +127,11 @@ def main(checkpoint, device):
                 
                 print("模型加载成功！")
                 print(f"观测历史步数 (n_obs_steps): {n_obs_steps}")
-                running = True
                 
                 # 清空历史并重置环境
                 obs_history.clear()
                 obs = env.reset()
+                running = True
                 
             except Exception as e:
                 print(f"加载模型出错: {e}")
