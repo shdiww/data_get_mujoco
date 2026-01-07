@@ -4,6 +4,7 @@ import hydra
 import pathlib
 import numpy as np
 import cv2
+import time
 import click
 import glfw
 from collections import deque
@@ -19,7 +20,8 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 @click.command()
 @click.option('-c', '--checkpoint', required=True, help='Path to checkpoint')
 @click.option('-d', '--device', default='cuda:0', help='Device to use')
-def main(checkpoint, device):
+@click.option('-f', '--frequency', default=30, type=int, help='Control frequency (Hz)')
+def main(checkpoint, device, frequency):
     # -------------------------------------------------------------------------
     # 1. 环境设置
     # -------------------------------------------------------------------------
@@ -32,7 +34,7 @@ def main(checkpoint, device):
     
     # 初始化 MuJoCo 环境
     # 使用 30Hz 以匹配数据采集频率
-    env = MujocoEnv(xml_path, camera_names=camera_names, frequency=30)
+    env = MujocoEnv(xml_path, camera_names=camera_names, frequency=frequency)
     
     # 获取对象 ID 用于评分
     red_box_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, "red_box")
@@ -77,6 +79,7 @@ def main(checkpoint, device):
 
     # 主循环
     while not glfw.window_should_close(env.window):
+        start_time = time.time()
         # ---------------------------------------------------------------------
         # 可视化与交互
         # ---------------------------------------------------------------------
@@ -204,8 +207,7 @@ def main(checkpoint, device):
                 result = policy.predict_action(obs_dict)
                 # result['action'] 形状为 (B, T_pred, D_action)
                 # 我们取第一个 batch
-                action = result['actio' \
-                'n'][0].detach().cpu().numpy()
+                action = result['action'][0].detach().cpu().numpy()
             
             # 4. 执行动作
             # 我们执行预测序列中的第一个动作 (闭环控制)
@@ -234,6 +236,11 @@ def main(checkpoint, device):
             # 空闲模式: 仅渲染场景
             # 不步进物理，所以机器人保持静止
             env.render()
+        
+        # 频率控制: 确保循环不会跑得比设定频率更快，并稳定帧率
+        elapsed = time.time() - start_time
+        if elapsed < env.dt:
+            time.sleep(env.dt - elapsed)
             
     env.close()
     cv2.destroyAllWindows()
