@@ -76,7 +76,7 @@ def main():
         # 重置缓存
         episode_low_dim['state'] = []
         episode_low_dim['action'] = []
-        episode_low_dim['timestep'] = []
+        episode_low_dim['timestamp'] = []
         
         # 准备视频录制
         episode_idx = replay_buffer.n_episodes
