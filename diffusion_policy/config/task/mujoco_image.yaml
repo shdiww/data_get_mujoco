@@ -1,6 +1,6 @@
 name: mujoco_image
 
-image_shape: [3, 640, 480]
+image_shape: [3, 480, 640]
 dataset_path: data/mujoco_demo
 
 shape_meta: &shape_meta

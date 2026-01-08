@@ -24,7 +24,8 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 @click.option('-c', '--checkpoint', required=True, help='Path to checkpoint')
 @click.option('-d', '--device', default='cuda:0', help='Device to use')
 @click.option('-f', '--frequency', default=30, type=int, help='Control frequency (Hz)')
-def main(checkpoint, device, frequency):
+@click.option('--steps', default=16, type=int, help='Diffusion inference steps (lower is faster)')
+def main(checkpoint, device, frequency, steps):
     # -------------------------------------------------------------------------
     # 0. 预加载配置 (为了获取正确的环境分辨率)
     # -------------------------------------------------------------------------
@@ -147,6 +148,12 @@ def main(checkpoint, device, frequency):
                 policy.to(device)
                 policy.eval()
                 
+                # [FIX] 覆盖推理步数 (Inference Steps)
+                # 训练时通常用 100 步，但推理时 DDIM 只需要 10-20 步即可
+                if hasattr(policy, 'num_inference_steps'):
+                    policy.num_inference_steps = steps
+                    print(f"[Config] 推理步数已从默认值调整为: {steps} (加速推理)")
+
                 # [FIX] Patch CropRandomizer -> CenterCrop
                 # 强制模型在推理时使用中心裁剪，消除 RandomCrop 带来的系统性偏差 (Systematic Bias)
                 # 同时保持输入形状与 shape_meta 一致，避免 assert 错误
