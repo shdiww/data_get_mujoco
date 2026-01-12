@@ -33,6 +33,24 @@ def main(checkpoint, device, frequency, steps):
     payload = torch.load(open(checkpoint, 'rb'), pickle_module=dill)
     cfg = payload['cfg']
 
+    # [Fix] 自动从 Config 检测频率
+    # 避免用户忘记加 -f 10 参数导致 10Hz 模型在 30Hz 环境下运行
+    try:
+        config_fps = OmegaConf.select(cfg, "task.env_runner.fps")
+        if config_fps is None:
+            config_fps = OmegaConf.select(cfg, "task.dataset.fps")
+        
+        if config_fps is not None:
+            config_fps = int(config_fps)
+            print(f"[Config] 检测到模型训练频率: {config_fps} Hz")
+            if frequency == 30 and config_fps != 30:
+                print(f"[Config] 自动切换控制频率: 30 Hz -> {config_fps} Hz")
+                frequency = config_fps
+            elif frequency != config_fps:
+                print(f"[Warning] 命令行频率 ({frequency} Hz) 与 Config ({config_fps} Hz) 不一致!")
+    except Exception as e:
+        print(f"[Config] 频率检测失败: {e}")
+
     # -------------------------------------------------------------------------
     # 1. 环境设置
     # -------------------------------------------------------------------------

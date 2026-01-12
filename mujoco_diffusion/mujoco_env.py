@@ -102,7 +102,7 @@ class MujocoEnv:
         self.action_dim = self.model.nu
         
         print(f"[Mujoco环境] 已通过XML初始化: {xml_path}")
-        print(f"[Mujoco环境] 动作维度: {self.action_dim}, 相机: {camera_names}")
+        print(f"[Mujoco环境] 动作维度: {self.action_dim}, 相机: {camera_names}, 频率: {self.frequency}Hz")
 
     def reset(self):
         """重置环境到初始状态"""
@@ -157,21 +157,29 @@ class MujocoEnv:
             )
             self.configuration.integrate_inplace(vel, self.dt)
             
-        # --- 应用控制量 ---
-        # 将计算出的关节位置应用到 ctrl (假设前7个是机械臂关节)
-        for i in range(7):
-            self.data.ctrl[i] = self.configuration.q[i]
-            
-        # 应用夹爪控制
+        # --- 应用控制量 (带插值) ---
+        # 为了解决 10Hz 低频控制下的抖动问题，我们在物理步进中对关节目标进行线性插值
+        # 这样可以避免给 PD 控制器施加巨大的阶跃信号
+        start_q = self.data.qpos[:7].copy()
+        target_q = self.configuration.q[:7]
+        
+        # 先设置夹爪 (夹爪通常是二值或慢速的，可以直接设置)
         for act_id in self.task.gripper_act_ids:
             if act_id != -1 and act_id < self.model.nu:
                 self.data.ctrl[act_id] = gripper_target
 
         # --- 物理步进 ---
-        # 为了模拟真实时间的控制频率，我们可能需要在一个控制周期内多次 step 物理引擎
-        # 假设 MuJoCo 的 timestep 是 0.002s，控制频率是 30Hz (0.033s)，则需要 step 约 16 次
         n_substeps = int(self.dt / self.model.opt.timestep)
-        for _ in range(n_substeps):
+        for i in range(n_substeps):
+            # 计算插值系数 alpha: 0 -> 1
+            alpha = (i + 1) / n_substeps
+            # 线性插值: current = start + alpha * (target - start)
+            interp_q = start_q + alpha * (target_q - start_q)
+            
+            # 更新机械臂关节控制目标
+            for j in range(7):
+                self.data.ctrl[j] = interp_q[j]
+                
             mujoco.mj_step(self.model, self.data)
 
         # 获取观测
