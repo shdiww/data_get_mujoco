@@ -16,6 +16,7 @@ from diffusion_policy.common.pytorch_util import dict_apply
 import torchvision.transforms as transforms
 import torchvision
 from diffusion_policy.model.vision.crop_randomizer import CropRandomizer
+from diffusion_policy.common.pytorch_util import dict_apply
 
 # 注册 eval 解析器 (配置文件中可能用到)
 OmegaConf.register_new_resolver("eval", eval, replace=True)
@@ -24,7 +25,7 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 @click.option('-c', '--checkpoint', required=True, help='Path to checkpoint')
 @click.option('-d', '--device', default='cuda:0', help='Device to use')
 @click.option('-f', '--frequency', default=30, type=int, help='Control frequency (Hz)')
-@click.option('--steps', default=16, type=int, help='Diffusion inference steps (lower is faster)')
+@click.option('--steps', default=100, type=int, help='Diffusion inference steps (lower is faster)')
 def main(checkpoint, device, frequency, steps):
     # -------------------------------------------------------------------------
     # 0. 预加载配置 (为了获取正确的环境分辨率)
@@ -67,6 +68,23 @@ def main(checkpoint, device, frequency, steps):
     target_h = cfg.task.image_shape[1]
     target_w = cfg.task.image_shape[2]
     print(f"[Fix] 强制设置 MuJoCo 渲染分辨率: W={target_w}, H={target_h}")
+    
+    # [Debug] 自动解析模型需要的图像 Key
+    # 很多时候模型不叫 'camera_0'，而是叫 'agentview_image' 等
+    model_obs_keys = list(cfg.task.shape_meta.obs.keys())
+    print(f"[Debug] 模型期望的观测 Keys: {model_obs_keys}")
+    
+    # 简单的自动映射逻辑 (根据包含关系猜测)
+    key_map = {}
+    for key in model_obs_keys:
+        if 'camera_0' in key or 'overview' in key or 'agent' in key:
+            key_map['overview'] = key
+        elif 'camera_1' in key or 'hand' in key or 'wrist' in key:
+            key_map['hand_camera'] = key
+    
+    print(f"[Debug] 相机映射关系: {key_map}")
+    if len(key_map) < 2:
+        print("[Warning] 无法自动完全映射相机！请检查代码中的 key_map")
 
     # 初始化 MuJoCo 环境
     # 使用 30Hz 以匹配数据采集频率
@@ -77,6 +95,46 @@ def main(checkpoint, device, frequency, steps):
     target_zone_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, "target_zone")
 
     # -------------------------------------------------------------------------
+    # [新增] 安全重置函数: 强制将机械臂降低到 0.3m
+    # -------------------------------------------------------------------------
+    def safe_reset(target_z=0.35):
+        obs = env.reset()
+        # 获取当前 Mocap 位置 (这是 IK 的目标)
+        current_pos = env.data.mocap_pos[0].copy()
+        
+        # 如果当前高度显著高于目标高度 (例如 > 0.35m)
+        if current_pos[2] > target_z + 0.05:
+            print(f"[SafeStart] 检测到初始高度过高 ({current_pos[2]:.2f}m)，正在平滑下降至 {target_z}m ...")
+            
+            # 插值参数
+            duration = 1.5 # 秒
+            steps = int(duration * env.frequency)
+            start_z = current_pos[2]
+            
+            for i in range(steps):
+                alpha = (i + 1) / steps
+                # 线性插值 Z 轴
+                new_z = start_z * (1 - alpha) + target_z * alpha
+                
+                # Update mocap
+                pos = env.data.mocap_pos[0].copy()
+                pos[2] = new_z
+                env.data.mocap_pos[0] = pos
+                
+                # 执行一步仿真 (IK 会追踪 Mocap)
+                # 保持夹爪张开 (0.04)
+                env.step(0.04) 
+                
+                # 渲染过程
+                env.render()
+            
+            # 重新获取观测
+            obs = env.get_observation()
+            print("[SafeStart] 调整完成，开始控制。")
+            
+        return obs
+
+    # -------------------------------------------------------------------------
     # 2. 推理变量初始化
     # -------------------------------------------------------------------------
     policy = None
@@ -85,6 +143,7 @@ def main(checkpoint, device, frequency, steps):
     obs_history = deque(maxlen=n_obs_steps)
     
     running = False
+    last_action = None
     
     print("========================================================")
     print("环境已就绪！")
@@ -94,7 +153,7 @@ def main(checkpoint, device, frequency, steps):
     print("========================================================")
     
     # 重置环境获取初始观测
-    obs = env.reset()
+    obs = safe_reset()
     
     def get_score():
         # 获取位置
@@ -169,8 +228,9 @@ def main(checkpoint, device, frequency, steps):
                 # [FIX] 覆盖推理步数 (Inference Steps)
                 # 训练时通常用 100 步，但推理时 DDIM 只需要 10-20 步即可
                 if hasattr(policy, 'num_inference_steps'):
-                    policy.num_inference_steps = steps
-                    print(f"[Config] 推理步数已从默认值调整为: {steps} (加速推理)")
+                    if steps > 0:
+                        policy.num_inference_steps = steps
+                        print(f"[Config] 推理步数已从默认值调整为: {steps} (加速推理)")
 
                 # [FIX] Patch CropRandomizer -> CenterCrop
                 # 强制模型在推理时使用中心裁剪，消除 RandomCrop 带来的系统性偏差 (Systematic Bias)
@@ -192,7 +252,9 @@ def main(checkpoint, device, frequency, steps):
                 
                 # 清空历史并重置环境
                 obs_history.clear()
-                obs = env.reset()
+                obs = safe_reset()
+                # [Add] 重置策略内部状态 (对齐 eval_real_robot)
+                policy.reset()
                 running = True
                 
             except Exception as e:
@@ -211,18 +273,24 @@ def main(checkpoint, device, frequency, steps):
             # 1. Resize 到 shape_meta 定义的尺寸 (模型期望的输入尺寸)
             c, h_in, w_in = cfg.task.shape_meta.obs.camera_0.shape
             img_overview = obs['images']['overview']
-            
-            # # [DEBUG] 终极 Debug: 保存原始图像
-            # # 检查点: 1. Shape 是否为 (480, 640, 3)? 2. 内容是否为全局视角?
-            # if not hasattr(policy, 'debug_raw_saved'):
-            #     policy.debug_raw_saved = True
-            #     print(f"Raw Image Shape: {img_overview.shape}")
-            #     cv2.imwrite("debug_raw_overview.png", cv2.cvtColor(img_overview, cv2.COLOR_RGB2BGR))
-
-            current_step['camera_0'] = cv2.resize(img_overview, (w_in, h_in), interpolation=cv2.INTER_AREA)
-
-            c, h_in, w_in = cfg.task.shape_meta.obs.camera_1.shape
             img_hand = obs['images']['hand_camera']
+
+            # [Debug] 检查图像是否全黑
+            if img_overview.max() < 10:
+                print("[Error] Overview 图像接近全黑！渲染可能未开启或光照错误。")
+            
+            # 使用动态映射的 Key
+            # 如果 key_map 为空，回退到默认 'camera_0'
+            key_overview = key_map.get('overview', 'camera_0')
+            key_hand = key_map.get('hand_camera', 'camera_1')
+            
+            # 获取目标尺寸 (从 cfg 中读取对应 key 的 shape)
+            # 注意: cfg shape 是 [C, H, W]
+            shape_overview = cfg.task.shape_meta.obs[key_overview].shape
+            current_step[key_overview] = cv2.resize(img_overview, (shape_overview[2], shape_overview[1]), interpolation=cv2.INTER_AREA)
+
+            shape_hand = cfg.task.shape_meta.obs[key_hand].shape
+            current_step[key_hand] = cv2.resize(img_hand, (shape_hand[2], shape_hand[1]), interpolation=cv2.INTER_AREA)
             
             # [DEBUG] 终极 Debug: 保存原始图像
             # 检查点: 1. Shape 是否为 (480, 640, 3)? 2. 内容是否为全局视角?
@@ -230,19 +298,24 @@ def main(checkpoint, device, frequency, steps):
                 policy.debug_raw_saved = True
                 print(f"Raw Image Shape: {img_hand.shape}")
                 cv2.imwrite("debug_raw_hand.png", cv2.cvtColor(img_hand, cv2.COLOR_RGB2BGR))
-
-            current_step['camera_1'] = cv2.resize(img_hand, (w_in, h_in), interpolation=cv2.INTER_AREA)
             
             # 状态: 7D (eef_pos + eef_rotvec + gripper_width)
             eef_pos = obs['robot_eef_pose'][:3]
             eef_quat = obs['robot_eef_pose'][3:] # wxyz
-            # 转换 wxyz -> xyzw (scipy 需要 xyzw)
-            r = R.from_quat(eef_quat[[1, 2, 3, 0]])
             
-            # 夹爪宽度 (取两个手指的平均值)
-            gripper_width = np.mean(obs['qpos'][-2:])
+            # [Fix] State Space Correction:
+            # Model expects: [x, y, z, rx, ry, rz, gripper] (7 dims)
+            # Previous code sent: [x, y, z, qx, qy, qz, qw] (7 dims) -> WRONG SEMANTICS
             
-            state_7d = np.concatenate([eef_pos, r.as_rotvec(), [gripper_width]])
+            # 1. Convert Quat (wxyz) -> RotVec (rx, ry, rz)
+            r = R.from_quat(eef_quat[[1, 2, 3, 0]]) # wxyz -> xyzw for scipy
+            rotvec = r.as_rotvec()
+            
+            # 2. Extract Gripper Width (sum of two finger joints, indices 7 & 8)
+            gripper_width = obs['qpos'][7] + obs['qpos'][8]
+            
+            # 3. Construct 7D State
+            state_7d = np.concatenate([eef_pos, rotvec, [gripper_width]])
             current_step['state'] = state_7d.astype(np.float32)
             
             # 添加到历史记录
@@ -256,8 +329,8 @@ def main(checkpoint, device, frequency, steps):
             
             # 2. 准备推理 Batch
             # 堆叠历史: (T, ...)
-            imgs_0 = np.stack([x['camera_0'] for x in obs_history])
-            imgs_1 = np.stack([x['camera_1'] for x in obs_history])
+            imgs_0 = np.stack([x[key_overview] for x in obs_history])
+            imgs_1 = np.stack([x[key_hand] for x in obs_history])
             states = np.stack([x['state'] for x in obs_history])
             
             # 处理图像: (T, H, W, C) -> (B, T, C, H, W)
@@ -266,14 +339,10 @@ def main(checkpoint, device, frequency, steps):
             imgs_1 = np.moveaxis(imgs_1, -1, 1).astype(np.float32) / 255.0
             
             # 添加 Batch 维度并移动到设备
-            imgs_0_t = torch.from_numpy(imgs_0).unsqueeze(0).to(device)
-            imgs_1_t = torch.from_numpy(imgs_1).unsqueeze(0).to(device)
-            states_t = torch.from_numpy(states).unsqueeze(0).to(device)
-            
             obs_dict = {
-                'camera_0': imgs_0_t,
-                'camera_1': imgs_1_t,
-                'state': states_t
+                key_overview: torch.from_numpy(imgs_0).unsqueeze(0).to(device),
+                key_hand: torch.from_numpy(imgs_1).unsqueeze(0).to(device),
+                'state': torch.from_numpy(states).unsqueeze(0).to(device)
             }
             
             # 3. 预测动作
@@ -285,7 +354,7 @@ def main(checkpoint, device, frequency, steps):
                     print("[DEBUG] 正在保存推理视图 (debug_inference_view.png)...")
                     try:
                         # 遍历所有相机 (camera_0, camera_1)
-                        for cam_name in ['camera_0', 'camera_1']:
+                        for cam_name in [key_overview, key_hand]:
                             if hasattr(policy, 'obs_encoder') and cam_name in policy.obs_encoder.key_transform_map:
                                 transform = policy.obs_encoder.key_transform_map[cam_name]
                                 # 取第一帧 (B=1, T, C, H, W) -> (C, H, W)
@@ -315,6 +384,21 @@ def main(checkpoint, device, frequency, steps):
                 # result['action'] 形状为 (B, T_pred, D_action)
                 # 我们取第一个 batch
                 action = result['action'][0].detach().cpu().numpy()
+
+                # [DEBUG] 验证反归一化 (Step 1)
+                # 检查输出是否在合理物理范围内 (例如: 位置应该在 0.3~0.8 之间，而不是 -1~1)
+                # 如果数值都在 -1.0 到 1.0 之间，说明反归一化失效
+                curr_action = action[0]
+                
+                # [Debug] 打印动作变化 (检查模型是否"死"了)
+                if last_action is not None:
+                    diff = np.linalg.norm(curr_action[:3] - last_action[:3])
+                    print(f"[Step] Action Pos: {curr_action[:3]} | Diff: {diff:.6f}")
+                    if diff < 1e-5:
+                        print("  [Warning] 动作完全无变化！模型可能未接收到有效输入。")
+                else:
+                    print(f"[Step] Action Pos: {curr_action[:3]} (First Step)")
+                last_action = curr_action.copy()
             
             # 4. 执行动作
             # 我们执行预测序列中的第一个动作 (闭环控制)
@@ -323,6 +407,10 @@ def main(checkpoint, device, frequency, steps):
             target_pos = target_action[:3]
             target_rotvec = target_action[3:6]
             target_gripper = target_action[6] 
+            
+            # [Fix] 夹爪二值化：消除扩散模型的噪声导致的微小抖动
+            # 阈值设为 0.02 (中间值)，大于则全开(0.04)，小于则全闭(0.0)
+            target_gripper = 0.04 if target_gripper > 0.02 else 0.0
             
             # 更新 Mocap 位置
             env.data.mocap_pos[0] = target_pos

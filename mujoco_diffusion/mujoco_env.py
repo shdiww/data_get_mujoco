@@ -103,6 +103,11 @@ class MujocoEnv:
         
         print(f"[Mujoco环境] 已通过XML初始化: {xml_path}")
         print(f"[Mujoco环境] 动作维度: {self.action_dim}, 相机: {camera_names}, 频率: {self.frequency}Hz")
+        
+        # [DEBUG] 检查时间步进 (Step 3)
+        sim_timestep = self.model.opt.timestep
+        n_substeps = int(self.dt / sim_timestep)
+        print(f"[DEBUG] Time Stepping: Control DT={self.dt:.4f}s | Sim Timestep={sim_timestep:.4f}s | Substeps per Step={n_substeps}")
 
     def reset(self):
         """重置环境到初始状态"""
