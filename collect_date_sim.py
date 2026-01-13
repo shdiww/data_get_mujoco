@@ -13,7 +13,7 @@ from mujoco_diffusion.video_recorder import VideoRecorder
 def main():
     # 配置
     # [修改] 将采集频率设置为 10Hz, 与你的评估频率保持一致
-    FREQUENCY = 10
+    FREQUENCY = 20
     xml_path = "/home/blzgz/data_get_mujoco/model/franka_emika_panda/mjx_scene.xml"
     # 根据 XML 文件修改相机名称: "overview" (场景相机) 和 "hand_camera" (手眼相机)
     camera_names = ["overview", "hand_camera"]
