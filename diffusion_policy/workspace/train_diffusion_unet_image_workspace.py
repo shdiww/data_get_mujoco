@@ -37,6 +37,19 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
     include_keys = ['global_step', 'epoch']
 
+
+    @staticmethod
+    def _prepare_media_for_wandb(step_log: dict):
+        if wandb is None:
+            return step_log
+        out = dict(step_log)
+        gif_key = 'preview/gif_path'
+        if gif_key in out and isinstance(out[gif_key], str):
+            gif_path = out[gif_key]
+            if os.path.exists(gif_path):
+                out['preview/gif'] = wandb.Video(gif_path, format='gif')
+        return out
+
     def __init__(self, cfg: OmegaConf, output_dir=None):
         super().__init__(cfg, output_dir=output_dir)
 
@@ -199,7 +212,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                         is_last_batch = (batch_idx == (len(train_dataloader)-1))
                         if not is_last_batch:
                             # log of last step is combined with validation and rollout
-                            wandb_run.log(step_log, step=self.global_step)
+                            wandb_run.log(self._prepare_media_for_wandb(step_log), step=self.global_step)
                             json_logger.log(step_log)
                             self.global_step += 1
 
@@ -287,7 +300,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
                 # end of epoch
                 # log of last step is combined with validation and rollout
-                wandb_run.log(step_log, step=self.global_step)
+                wandb_run.log(self._prepare_media_for_wandb(step_log), step=self.global_step)
                 json_logger.log(step_log)
                 self.global_step += 1
                 self.epoch += 1

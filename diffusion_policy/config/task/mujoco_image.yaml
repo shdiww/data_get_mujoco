@@ -1,6 +1,6 @@
 name: mujoco_image
 
-image_shape: [3, 480, 640]
+image_shape: [3, 240, 320]
 dataset_path: data/mujoco_demo
 
 shape_meta: &shape_meta
@@ -28,7 +28,10 @@ shape_meta: &shape_meta
     shape: [7]
 
 env_runner:
-  _target_: diffusion_policy.env_runner.real_pusht_image_runner.RealPushTImageRunner
+  _target_: diffusion_policy.env_runner.mujoco_image_runner.MujocoImageRunner
+  dataset_path: ${task.dataset_path}
+  camera_idx: 0
+  max_frames: 80
 
 dataset:
   _target_: diffusion_policy.dataset.real_pusht_image_dataset.RealPushTImageDataset

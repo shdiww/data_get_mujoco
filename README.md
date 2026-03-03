@@ -55,3 +55,10 @@ python collect_date_sim.py
     *   或者完成任务（方块放入目标区并抬起），环境自动重置。
     *   以上操作都会触发数据保存，数据将追加写入到 `data/mujoco_demo.zarr` 文件中。
 *   **无效数据**: 步数过短（<10步）的回合会被自动丢弃。
+
+
+## Franka + Xbox 新功能规划
+
+已新增一份分阶段落地文档，覆盖可行性判断、模块重构优先级与建议目录结构：
+
+- `docs/franka_xbox_mujoco_plan.md`
