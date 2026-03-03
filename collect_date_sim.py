@@ -1,14 +1,12 @@
 import pathlib
-import cv2
 import time
 import numpy as np
-import mujoco
 import glfw
-from scipy.spatial.transform import Rotation as R
 from diffusion_policy.common.replay_buffer import ReplayBuffer # This is correct
 from mujoco_diffusion.mujoco_env import MujocoEnv # Correctly imports from the package
 from mujoco_diffusion.gamepad_controller import GamepadController # Correctly imports from the package
 from mujoco_diffusion.video_recorder import VideoRecorder
+from mujoco_diffusion.episode_recorder import EpisodeRecorder
 
 def main():
     # 配置
@@ -53,58 +51,12 @@ def main():
     replay_buffer = ReplayBuffer.create_from_path(zarr_path=zarr_path, mode='a')
     print(f"数据集将保存至: {dataset_root}")
     
-    is_recording = False
     last_time = time.time()
     fps = 0.0
 
-    # 临时缓存 (只存低维数据)
-    episode_low_dim = {
-        'state': [],
-        'action': [],
-        'timestamp': []
-    }
-
-    # 初始化视频录制器
-    # [修改] 视频 FPS 也需要同步修改，否则录制的视频回放速度会不对
+    # 录制管理器（低维 + 视频 + zarr）
     recorder = VideoRecorder(video_dir, camera_names, fps=float(FREQUENCY),resolution=(env.obs_width, env.obs_height))
-
-    def start_recording():
-        nonlocal is_recording, episode_low_dim
-        is_recording = True
-        print("\n[录制] 开始")
-        
-        # 重置缓存
-        episode_low_dim['state'] = []
-        episode_low_dim['action'] = []
-        episode_low_dim['timestamp'] = []
-        
-        # 准备视频录制
-        episode_idx = replay_buffer.n_episodes
-        recorder.start_recording(episode_idx)
-
-    def stop_recording(save=True):
-        nonlocal is_recording, episode_low_dim
-        is_recording = False
-        print(f"\n[录制] 停止。")
-
-        # 检查数据长度，如果太短则不保存
-        if save and len(episode_low_dim['timestamp']) <= 10:
-            print("回合太短，已丢弃。")
-            save = False
-
-        recorder.stop_recording(save=save)
-
-        if save:
-            print(f"正在保存 {len(episode_low_dim['timestamp'])} 步数据...")
-            
-            data = {
-                'state': np.array(episode_low_dim['state'], dtype=np.float32),
-                'action': np.array(episode_low_dim['action'], dtype=np.float32),
-                'timestamp': np.array(episode_low_dim['timestamp'], dtype=np.float64)
-            }
-            
-            replay_buffer.add_episode(data, compressors='disk')
-            print(f"已保存至 Zarr。总回合数: {replay_buffer.n_episodes}")
+    episode_recorder = EpisodeRecorder(replay_buffer=replay_buffer, video_recorder=recorder, min_steps=10)
 
     # 主循环 (使用 env.window 判断退出)
     while not glfw.window_should_close(env.window):
@@ -119,17 +71,20 @@ def main():
 
             if reset_cmd:
                 print("已通过手柄重置！")
-                if is_recording:
-                    stop_recording(save=True)
+                if episode_recorder.is_recording:
+                    saved = episode_recorder.stop(save=True)
+                    print(f"重置前录制保存: {saved}")
                 env.reset()
                 gripper_target = 0.04
 
             # --- 录制控制 ---
             if controller.is_record_toggled():
-                if not is_recording:
-                    start_recording()
+                if not episode_recorder.is_recording:
+                    episode_recorder.start()
+                    print("\n[录制] 开始")
                 else:
-                    stop_recording(save=True)
+                    saved = episode_recorder.stop(save=True)
+                    print(f"\n[录制] 停止，保存: {saved}")
 
             # --- 更新 Mocap 目标 (Target) ---
             # 我们直接修改 data.mocap_pos，Mink IK 会在 env.step 中让机械臂去追这个点
@@ -145,37 +100,21 @@ def main():
             gripper_target = np.clip(gripper_target, 0.0, 0.04)
             
             # --- 收集数据 (在 Step 之前) ---
-            if is_recording:
-                # 1. 写入视频帧
-                recorder.write_frame(obs['images'])
-                
-                # 2. 记录低维数据 (转为 7维: XYZ + RotVec + Gripper)
-                # State: 实际末端位姿
-                eef_pos = obs['robot_eef_pose'][:3]
-                eef_quat = obs['robot_eef_pose'][3:] # wxyz
-                r = R.from_quat(eef_quat[[1, 2, 3, 0]]) # xyzw
-                
-                # 获取夹爪实际宽度 (假设最后两个关节是手指)
-                gripper_width = np.mean(obs['qpos'][-2:])
-                state_7d = np.concatenate([eef_pos, r.as_rotvec(), [gripper_width]])
-                
-                # Action: 目标位姿 (Mocap)
-                mocap_pos = env.data.mocap_pos[0].copy()
-                mocap_quat = env.data.mocap_quat[0].copy() # wxyz
-                r_target = R.from_quat(mocap_quat[[1, 2, 3, 0]])
-                action_7d = np.concatenate([mocap_pos, r_target.as_rotvec(), [gripper_target]])
-
-                episode_low_dim['state'].append(state_7d)
-                episode_low_dim['action'].append(action_7d)
-                episode_low_dim['timestamp'].append(time.time())
+            episode_recorder.append(
+                obs=obs,
+                mocap_pos=env.data.mocap_pos[0].copy(),
+                mocap_quat_wxyz=env.data.mocap_quat[0].copy(),
+                gripper_target=gripper_target
+            )
 
             obs = env.step(gripper_target)
 
             # --- 任务检查 ---
             if env.task.check_completion(env.model, env.data):
                 print("任务完成！正在重置...")
-                if is_recording:
-                    stop_recording(save=True)
+                if episode_recorder.is_recording:
+                    saved = episode_recorder.stop(save=True)
+                    print(f"重置前录制保存: {saved}")
                 env.reset()
                 gripper_target = 0.04 # 重置后夹爪默认张开
 
@@ -185,7 +124,7 @@ def main():
             fps = 1.0 / (curr_time - last_time)
             last_time = curr_time
             
-            env.render(fps=fps, gripper_val=gripper_target, is_recording=is_recording)
+            env.render(fps=fps, gripper_val=gripper_target, is_recording=episode_recorder.is_recording)
 
             # --- 频率控制 ---
             # 确保循环频率与 env.frequency 一致

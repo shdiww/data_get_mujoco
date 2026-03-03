@@ -55,3 +55,44 @@ python collect_date_sim.py
     *   或者完成任务（方块放入目标区并抬起），环境自动重置。
     *   以上操作都会触发数据保存，数据将追加写入到 `data/mujoco_demo.zarr` 文件中。
 *   **无效数据**: 步数过短（<10步）的回合会被自动丢弃。
+
+
+## Franka + Xbox 新功能规划
+
+已新增一份分阶段落地文档，覆盖可行性判断、模块重构优先级与建议目录结构：
+
+- `docs/franka_xbox_mujoco_plan.md`
+
+
+## 环境配置（对齐 diffusion_policy）
+
+已根据上游仓库 `real-stanford/diffusion_policy` 的 `conda_environment.yaml`，提供一个更贴近当前 MuJoCo 图像任务的环境模板：
+
+- `environment/mujoco_image_conda.yaml`
+- `scripts/setup_env_mujoco_image.sh`
+- `scripts/verify_env.py`
+- `environment/mujoco_image_requirements.txt`（无 conda 时的 venv 方案）
+
+### 一键创建（推荐）
+
+```bash
+bash scripts/setup_env_mujoco_image.sh mujoco-image
+```
+
+### 手动方式
+
+```bash
+conda env create -f environment/mujoco_image_conda.yaml -n mujoco-image
+conda activate mujoco-image
+python scripts/verify_env.py
+```
+
+> 如果你服务器 CUDA / 驱动版本与 `cudatoolkit=11.8` 不一致，优先调整 `environment/mujoco_image_conda.yaml` 中 `pytorch`/`cudatoolkit` 对应版本再安装。
+
+
+### 无 conda 时（venv）
+
+```bash
+bash scripts/setup_env_mujoco_image.sh
+source .venv/bin/activate
+```

@@ -45,7 +45,7 @@ policy:
       weights: IMAGENET1K_V1
     resize_shape: [240, 320]
     crop_shape: [216, 288] # ch, cw 240x320 90%
-    random_crop: True
+    random_crop: False
     use_group_norm: False
     share_rgb_model: True
     imagenet_norm: True
@@ -74,15 +74,15 @@ ema:
   max_value: 0.9999
 
 dataloader:
-  batch_size: 12
-  num_workers: 8
+  batch_size: 16
+  num_workers: 4
   shuffle: True
   pin_memory: True
   persistent_workers: True
 
 val_dataloader:
-  batch_size: 12
-  num_workers: 8
+  batch_size: 16
+  num_workers: 4
   shuffle: False
   pin_memory: True
   persistent_workers: True
