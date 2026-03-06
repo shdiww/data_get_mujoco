@@ -20,22 +20,54 @@ class InputListener:
         self.button_right = False
         self.lastx = 0
         self.lasty = 0
-        self.key_states = {}
-        self.latched_keys = set()  # 用于记录当前帧内触发过的按键，防止短按丢失
-        self.MOVE_SPEED = 0.2  # m/s
-        self.GRIPPER_SPEED = 0.15  # m/s
+        self.MOVE_SPEED = 0.08  # m/s
+        self.GRIPPER_SPEED = 0.10  # m/s
+        self.GAMEPAD_DEADZONE = 0.28
+        self.GAMEPAD_SMOOTH_ALPHA = 0.35
+        self.GAMEPAD_STOP_EPS = 0.02
         self.prev_gamepad_buttons = []
+        self.active_gamepad_id = None
+        self.filtered_move = np.zeros(3)
 
-    def keyboard(self, window, key, scancode, act, mods):
-        if act == glfw.PRESS:
-            self.key_states[key] = True
-            self.latched_keys.add(key)
-        elif act == glfw.RELEASE:
-            self.key_states[key] = False
+    def _find_active_gamepad(self):
+        """选择一个最可能的手柄设备ID。"""
+        candidates = []
+        joystick_ids = [
+            glfw.JOYSTICK_1, glfw.JOYSTICK_2, glfw.JOYSTICK_3, glfw.JOYSTICK_4,
+            glfw.JOYSTICK_5, glfw.JOYSTICK_6, glfw.JOYSTICK_7, glfw.JOYSTICK_8,
+            glfw.JOYSTICK_9, glfw.JOYSTICK_10, glfw.JOYSTICK_11, glfw.JOYSTICK_12,
+            glfw.JOYSTICK_13, glfw.JOYSTICK_14, glfw.JOYSTICK_15, glfw.JOYSTICK_16,
+        ]
 
-        # 重置逻辑保留在回调中，因为它是单次触发动作
-        if act == glfw.PRESS and key == glfw.KEY_R:
-            self._reset_simulation()
+        for jid in joystick_ids:
+            if not glfw.joystick_present(jid):
+                continue
+
+            name = glfw.get_joystick_name(jid) or ""
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", errors="ignore")
+            name_lower = name.lower()
+
+            axes_state, axes_count = glfw.get_joystick_axes(jid)
+            buttons_state, buttons_count = glfw.get_joystick_buttons(jid)
+
+            if axes_count < 4 or buttons_count < 2:
+                continue
+
+            score = 0
+            if glfw.joystick_is_gamepad(jid):
+                score += 3
+            if any(k in name_lower for k in ("xbox", "xinput", "controller", "gamepad")):
+                score += 2
+            score += min(axes_count, 8) * 0.1 + min(buttons_count, 16) * 0.05
+
+            candidates.append((score, jid))
+
+        if not candidates:
+            return None
+
+        candidates.sort(reverse=True)
+        return candidates[0][1]
 
     def _reset_simulation(self):
         """重置仿真环境"""
@@ -52,83 +84,92 @@ class InputListener:
         self.gripper_target = 0.04
 
     def update(self, dt):
-        """在主循环中调用，处理连续移动"""
-        # 检查 Shift 键状态
-        is_shift = self.key_states.get(glfw.KEY_LEFT_SHIFT, False) or \
-                   self.key_states.get(glfw.KEY_RIGHT_SHIFT, False)
-        multiplier = 5.0 if is_shift else 1.0
+        """在主循环中调用，仅处理手柄连续移动"""
 
-        move_step = self.MOVE_SPEED * multiplier * dt
-        gripper_step = self.GRIPPER_SPEED * multiplier * dt
-
-        # 移动控制 (支持同时按键，并归一化速度向量，优化点按体验)
-        move_vec = np.zeros(3)
-        
-        def get_weight(key):
-            if self.key_states.get(key, False):
-                return 1.0
-            elif key in self.latched_keys:
-                return 0.4  # 点按(未长按)时给予较小的权重，避免突变
-            return 0.0
-
-        move_vec[0] += get_weight(glfw.KEY_W)
-        move_vec[0] -= get_weight(glfw.KEY_S)
-        move_vec[1] += get_weight(glfw.KEY_A)
-        move_vec[1] -= get_weight(glfw.KEY_D)
-        move_vec[2] += get_weight(glfw.KEY_Q)
-        move_vec[2] -= get_weight(glfw.KEY_E)
-
-        norm = np.linalg.norm(move_vec)
-        if norm > 0:
-            # 如果合力大于1 (例如同时按W和A)，归一化到1
-            # 如果合力小于1 (例如只点按W)，保持原大小，从而实现微动
-            scale = 1.0 / norm if norm > 1.0 else 1.0
-            self.data.mocap_pos[0] += move_vec * scale * move_step
-
-        # 夹爪控制
-        self.gripper_target -= get_weight(glfw.KEY_Z) * gripper_step
-        self.gripper_target += get_weight(glfw.KEY_X) * gripper_step
+        def apply_deadzone_and_curve(value):
+            magnitude = abs(value)
+            if magnitude <= self.GAMEPAD_DEADZONE:
+                return 0.0
+            norm = (magnitude - self.GAMEPAD_DEADZONE) / (1.0 - self.GAMEPAD_DEADZONE)
+            curved = norm * norm
+            return np.sign(value) * curved
 
         # --- Xbox 手柄控制 ---
-        if glfw.joystick_present(glfw.JOYSTICK_1):
-            axes_state, axes_count = glfw.get_joystick_axes(glfw.JOYSTICK_1)
+        if self.active_gamepad_id is None or not glfw.joystick_present(self.active_gamepad_id):
+            self.active_gamepad_id = self._find_active_gamepad()
+        if self.active_gamepad_id is not None:
+            jid = self.active_gamepad_id
+            axes_state, axes_count = glfw.get_joystick_axes(jid)
             axes = [axes_state[i] for i in range(axes_count)]
-            buttons_state, buttons_count = glfw.get_joystick_buttons(glfw.JOYSTICK_1)
+            buttons_state, buttons_count = glfw.get_joystick_buttons(jid)
             buttons = [buttons_state[i] for i in range(buttons_count)]
-            
-            # 死区设置 (防止漂移)
-            deadzone = 0.15
+
+            # 过滤非标准手柄映射，避免漂移
+            if len(axes) < 5 or len(buttons) < 2:
+                self.prev_gamepad_buttons = []
+                axes = []
+                buttons = []
+                self.filtered_move[:] = 0.0
+
+            def axis_value(index):
+                return axes[index] if index < len(axes) else 0.0
+
+            def button_pressed(index):
+                return index < len(buttons) and bool(buttons[index])
             
             # 左摇杆 (Axes 0/1): 控制 XY 平面移动
             # Axis 1 (Y) 通常是反向的 (上是 -1)
-            if abs(axes[1]) > deadzone:
-                self.data.mocap_pos[0, 0] -= axes[1] * self.MOVE_SPEED * dt
-            if abs(axes[0]) > deadzone:
-                self.data.mocap_pos[0, 1] -= axes[0] * self.MOVE_SPEED * dt
+            axis_1 = axis_value(1)
+            axis_0 = axis_value(0)
 
-            # 右摇杆 Y轴 (Axis 4): 控制 Z 轴高度
-            if abs(axes[4]) > deadzone:
-                self.data.mocap_pos[0, 2] -= axes[4] * self.MOVE_SPEED * dt
+            # 右摇杆 Y轴: 控制 Z 轴高度
+            # 一些驱动映射在 Axis 4，另一些映射在 Axis 3
+            axis_4 = axis_value(4)
+            axis_3 = axis_value(3)
+            z_axis = axis_4 if abs(axis_4) > abs(axis_3) else axis_3
+
+            raw_move = np.array(
+                [
+                    apply_deadzone_and_curve(-axis_1),
+                    apply_deadzone_and_curve(-axis_0),
+                    apply_deadzone_and_curve(-z_axis),
+                ],
+                dtype=float,
+            )
+
+            if np.max(np.abs(raw_move)) < self.GAMEPAD_STOP_EPS:
+                self.filtered_move[:] = 0.0
+            else:
+                self.filtered_move = (1.0 - self.GAMEPAD_SMOOTH_ALPHA) * self.filtered_move + self.GAMEPAD_SMOOTH_ALPHA * raw_move
+
+            move_norm = np.linalg.norm(self.filtered_move)
+            if move_norm > 1.0:
+                move_cmd = self.filtered_move / move_norm
+            else:
+                move_cmd = self.filtered_move
+
+            self.data.mocap_pos[0] += move_cmd * self.MOVE_SPEED * dt
 
             # 按钮 A (0): 闭合夹爪
-            if buttons[0]:
+            if button_pressed(0):
                 self.gripper_target -= self.GRIPPER_SPEED * dt
             # 按钮 B (1): 张开夹爪
-            if buttons[1]:
+            if button_pressed(1):
                 self.gripper_target += self.GRIPPER_SPEED * dt
 
             # 按钮 Start (7): 重置 (防止连续触发)
-            if len(buttons) > 7 and buttons[7] and (len(self.prev_gamepad_buttons) <= 7 or not self.prev_gamepad_buttons[7]):
+            prev_start = len(self.prev_gamepad_buttons) > 7 and bool(self.prev_gamepad_buttons[7])
+            if button_pressed(7) and not prev_start:
                 self._reset_simulation()
             
             self.prev_gamepad_buttons = list(buttons)
+        else:
+            self.prev_gamepad_buttons = []
+            self.filtered_move[:] = 0.0
 
         # 限制范围
         self.gripper_target = np.clip(self.gripper_target, 0.0, 0.04)
         np.clip(self.data.mocap_pos[0], self.abs_pos_limits[:, 0], self.abs_pos_limits[:, 1], out=self.data.mocap_pos[0])
-
-        # 清除本帧的锁存按键
-        self.latched_keys.clear()
 
     def mouse_button(self, window, button, act, mods):
         if button == glfw.MOUSE_BUTTON_LEFT: self.button_left = act == glfw.PRESS

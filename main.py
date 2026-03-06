@@ -1,6 +1,6 @@
 from pathlib import Path
+from dataclasses import dataclass
 
-import glfw
 import mujoco
 import numpy as np
 from loop_rate_limiters import RateLimiter
@@ -8,6 +8,8 @@ from loop_rate_limiters import RateLimiter
 import mink
 
 from keyboard import InputListener
+from renderer import MujocoRenderer
+from success import TaskSuccessEvaluator
 from task import PickAndPlaceTask
 
 _HERE = Path(__file__).parent
@@ -18,6 +20,22 @@ SOLVER = "daqp"  # 使用的二次规划求解器
 POS_THRESHOLD = 1e-4  # 位置误差收敛阈值 (米)
 ORI_THRESHOLD = 1e-4  # 方向误差收敛阈值 (弧度)
 MAX_ITERS = 20  # 单步IK的最大迭代次数
+
+
+@dataclass
+class AppContext:
+    model: mujoco.MjModel
+    data: mujoco.MjData
+    task: PickAndPlaceTask
+    success_evaluator: TaskSuccessEvaluator
+    configuration: mink.Configuration
+    end_effector_task: mink.FrameTask
+    tasks: list
+    renderer: MujocoRenderer
+    input_listener: InputListener
+    rate: RateLimiter
+    start_qpos: np.ndarray
+    initial_pos: np.ndarray
 
 
 def converge_ik(
@@ -56,102 +74,12 @@ def converge_ik(
     return False
 
 
-def main():
-    # 加载MuJoCo模型和数据
-    model = mujoco.MjModel.from_xml_path(_XML.as_posix())
-    data = mujoco.MjData(model)
-    
-    # 初始化任务环境 (自动获取相关ID)
-    task = PickAndPlaceTask(model)
-
-    # 创建一个Mink机器人构型对象
-    configuration = mink.Configuration(model)
-
-    # 定义IK任务
-    # 1. 末端执行器任务：控制 "attachment_site" 的位置和姿态
-    end_effector_task = mink.FrameTask(
-        frame_name="attachment_site",  # 目标帧的名称
-        frame_type="site",  # 目标帧的类型
-        position_cost=1.0,  # 位置误差的权重
-        orientation_cost=1.0,  # 方向误差的权重
-        lm_damping=1.0,  # Levenberg-Marquardt 阻尼系数
-    )
-    # 2. 姿态任务：让机器人保持一个较为自然的姿态，避免奇异构型
-    posture_task = mink.PostureTask(model=model, cost=1e-2)
-    # 任务列表
-    tasks = [end_effector_task, posture_task]
-
-    # --- GLFW 和渲染设置 ---
-    if not glfw.init():
-        raise Exception("初始化GLFW失败")
-    window = glfw.create_window(1800, 900, "Franka Emika Panda", None, None)
-    if not window:
-        glfw.terminate()
-        raise Exception("创建GLFW窗口失败")
-    glfw.make_context_current(window)
-    glfw.swap_interval(1)  # 开启垂直同步
-
-    # --- 仿真和mocap(运动捕捉)目标初始化 ---
-    # 直接重置到 "home" 关键帧，该关键帧现在是我们的低位起始姿态
-    mujoco.mj_resetDataKeyframe(model, data, model.key("home").id)
-    start_qpos = data.qpos.copy()  # 保存初始姿态
-
-    # 随机化方块位置
-    task.randomize_box(model, data)
-
-    # 更新正向运动学，以反映关节和方块位置的变化
-    mujoco.mj_forward(model, data)
-
-    # 将 mocap 目标 ("target") 移动到当前末端执行器的位置
-    # 这样可以确保控制开始时，目标和机械臂末端是对齐的，避免跳动
-    mink.move_mocap_to_frame(model, data, "target", "attachment_site", "site")
-    initial_pos = data.mocap_pos[0].copy()
-
-    # 更新IK求解器的状态
-    configuration.update(data.qpos)
-    posture_task.set_target_from_configuration(configuration)
-
-    # --- 为交互定义回调函数和状态变量 ---
-    cam = mujoco.MjvCamera()
-    opt = mujoco.MjvOption()
-    pert = mujoco.MjvPerturb()
-    scene = mujoco.MjvScene(model, maxgeom=10000)
-    context = mujoco.MjrContext(model, mujoco.mjtFontScale.mjFONTSCALE_150)
-    mujoco.mjv_defaultFreeCamera(model, cam)
-
-    # 初始化第二个相机 (用于右侧固定视角)
-    cam2 = mujoco.MjvCamera()
-    cam2.type = mujoco.mjtCamera.mjCAMERA_FIXED
-    cam2.fixedcamid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "overview")
-
-    # 初始化第三个相机 (用于手眼视角)
-    cam3 = mujoco.MjvCamera()
-    cam3.type = mujoco.mjtCamera.mjCAMERA_FIXED
-    cam3.fixedcamid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "hand_camera")
-
-    # 定义一个相对于初始位置的可达工作空间
-    POS_LIMITS = np.array([[-0.5, 0.5], [-0.5, 0.5], [-0.6, 0.5]])  # x, y, z的相对范围
-    abs_pos_limits = POS_LIMITS + initial_pos[:, np.newaxis]
-
-    # 初始化输入监听器
-    input_listener = InputListener(model, data, scene, cam, task.box_id, abs_pos_limits)
-
-    glfw.set_key_callback(window, input_listener.keyboard)
-    glfw.set_cursor_pos_callback(window, input_listener.mouse_move)
-    glfw.set_mouse_button_callback(window, input_listener.mouse_button)
-    glfw.set_scroll_callback(window, input_listener.scroll)
-
-    # --- 主循环 ---
-    rate = RateLimiter(frequency=200.0, warn=False)
+def _print_controls():
     print("\n---")
     print("控制说明:")
-    print("  W/S/A/D/Q/E: 移动机械臂末端目标")
     print("  鼠标左键拖动: 旋转视角")
     print("  鼠标右键拖动: 平移视角")
     print("  鼠标滚轮: 缩放视角")
-    print("  Z / X: 闭合/张开 夹爪")
-    print("  R: 重置仿真并随机化方块位置")
-    print("  按住 Shift: 加快移动/开合速度")
     print("---\n")
     print("控制说明 (手柄):")
     print("  左摇杆: 前后左右移动 (XY轴)")
@@ -162,64 +90,116 @@ def main():
     print("任务: 将方块移动到地板上的红色圆形区域")
     print("目标点已被限制在安全工作区域内。")
 
-    while not glfw.window_should_close(window):
-        dt = rate.dt
-        input_listener.update(dt)
-        T_wt = mink.SE3.from_mocap_name(model, data, "target")
-        end_effector_task.set_target(T_wt)
-        converge_ik(configuration, tasks, dt, SOLVER, POS_THRESHOLD, ORI_THRESHOLD, MAX_ITERS)
 
-        # 夹爪控制: 覆盖IK计算出的夹爪关节角度
-        gripper_target = input_listener.gripper_target
-        configuration.q[7] = gripper_target
-        if configuration.q.shape[0] > 8:
-            configuration.q[8] = gripper_target
+def initialize_app():
+    # 加载 MuJoCo 模型和数据
+    model = mujoco.MjModel.from_xml_path(_XML.as_posix())
+    data = mujoco.MjData(model)
 
-        # 将控制信号应用到致动器
-        if model.nu > 0:
-            # 1. 优先设置夹爪致动器 (如果存在)
-            if task.gripper_act1 != -1: data.ctrl[task.gripper_act1] = gripper_target
-            if task.gripper_act2 != -1: data.ctrl[task.gripper_act2] = gripper_target
-            
-            # 2. 设置手臂致动器 (假设非夹爪的致动器对应手臂关节)
-            for i in range(model.nu):
-                if i != task.gripper_act1 and i != task.gripper_act2:
-                    data.ctrl[i] = configuration.q[i]
-        else:
-            # 如果没有任何致动器，回退到直接修改关节位置 (瞬移)
-            if configuration.q.shape[0] > 8:
-                data.qpos[7] = gripper_target
-                data.qpos[8] = gripper_target
+    # 任务与成功判定
+    task = PickAndPlaceTask(model)
+    success_evaluator = TaskSuccessEvaluator(model)
 
-        mujoco.mj_step(model, data)
-        
-        # --- 分屏渲染 ---
-        width, height = glfw.get_framebuffer_size(window)
-        
-        # 1. 左侧视图 (主相机)
-        viewport1 = mujoco.MjrRect(0, 0, width // 3, height)
-        mujoco.mjv_updateScene(model, data, opt, pert, cam, mujoco.mjtCatBit.mjCAT_ALL, scene)
-        mujoco.mjr_render(viewport1, scene, context)
+    # IK 相关初始化
+    configuration = mink.Configuration(model)
+    end_effector_task = mink.FrameTask(
+        frame_name="attachment_site",
+        frame_type="site",
+        position_cost=1.0,
+        orientation_cost=1.0,
+        lm_damping=1.0,
+    )
+    posture_task = mink.PostureTask(model=model, cost=1e-2)
+    tasks = [end_effector_task, posture_task]
 
-        # 2. 中间视图 (全局概览)
-        viewport2 = mujoco.MjrRect(width // 3, 0, width // 3, height)
-        mujoco.mjv_updateScene(model, data, opt, pert, cam2, mujoco.mjtCatBit.mjCAT_ALL, scene)
-        mujoco.mjr_render(viewport2, scene, context)
+    # 渲染初始化
+    renderer = MujocoRenderer(model)
+    renderer.init()
 
-        # 3. 右侧视图 (手眼相机)
-        viewport3 = mujoco.MjrRect(2 * (width // 3), 0, width - 2 * (width // 3), height)
-        mujoco.mjv_updateScene(model, data, opt, pert, cam3, mujoco.mjtCatBit.mjCAT_ALL, scene)
-        mujoco.mjr_render(viewport3, scene, context)
+    # 仿真和 mocap 初始化
+    mujoco.mj_resetDataKeyframe(model, data, model.key("home").id)
+    start_qpos = data.qpos.copy()
+    task.randomize_box(model, data)
+    mujoco.mj_forward(model, data)
+    mink.move_mocap_to_frame(model, data, "target", "attachment_site", "site")
+    initial_pos = data.mocap_pos[0].copy()
+    configuration.update(data.qpos)
+    posture_task.set_target_from_configuration(configuration)
 
-        # 计算方块与目标区域的重合面积，如果完全重合则重置
-        if task.check_completion(model, data):
-            task.reset(model, data, start_qpos, configuration, initial_pos, input_listener)
+    # 输入监听初始化
+    pos_limits = np.array([[-0.5, 0.5], [-0.5, 0.5], [-0.6, 0.5]])
+    abs_pos_limits = pos_limits + initial_pos[:, np.newaxis]
+    input_listener = InputListener(model, data, renderer.scene, renderer.cam, task.box_id, abs_pos_limits)
+    renderer.register_mouse_callbacks(input_listener)
 
-        glfw.swap_buffers(window)
-        glfw.poll_events()
-        rate.sleep()
+    # 主循环频率
+    rate = RateLimiter(frequency=30.0, warn=False)
 
-    glfw.terminate()
+    return AppContext(
+        model=model,
+        data=data,
+        task=task,
+        success_evaluator=success_evaluator,
+        configuration=configuration,
+        end_effector_task=end_effector_task,
+        tasks=tasks,
+        renderer=renderer,
+        input_listener=input_listener,
+        rate=rate,
+        start_qpos=start_qpos,
+        initial_pos=initial_pos,
+    )
+
+
+def main():
+    app = initialize_app()
+    _print_controls()
+
+    try:
+        while not app.renderer.should_close():
+            dt = app.rate.dt
+            app.input_listener.update(dt)
+            T_wt = mink.SE3.from_mocap_name(app.model, app.data, "target")
+            app.end_effector_task.set_target(T_wt)
+            converge_ik(app.configuration, app.tasks, dt, SOLVER, POS_THRESHOLD, ORI_THRESHOLD, MAX_ITERS)
+
+            # 夹爪控制: 覆盖IK计算出的夹爪关节角度
+            gripper_target = app.input_listener.gripper_target
+            app.configuration.q[7] = gripper_target
+            if app.configuration.q.shape[0] > 8:
+                app.configuration.q[8] = gripper_target
+
+            # 将控制信号应用到致动器
+            if app.model.nu > 0:
+                if app.task.gripper_act1 != -1:
+                    app.data.ctrl[app.task.gripper_act1] = gripper_target
+                if app.task.gripper_act2 != -1:
+                    app.data.ctrl[app.task.gripper_act2] = gripper_target
+                for i in range(app.model.nu):
+                    if i != app.task.gripper_act1 and i != app.task.gripper_act2:
+                        app.data.ctrl[i] = app.configuration.q[i]
+            else:
+                if app.configuration.q.shape[0] > 8:
+                    app.data.qpos[7] = gripper_target
+                    app.data.qpos[8] = gripper_target
+
+            mujoco.mj_step(app.model, app.data)
+            app.renderer.render(app.data)
+
+            if app.success_evaluator.is_success(app.model, app.data):
+                app.task.reset(
+                    app.model,
+                    app.data,
+                    app.start_qpos,
+                    app.configuration,
+                    app.initial_pos,
+                    app.input_listener,
+                )
+
+            app.renderer.refresh()
+            app.rate.sleep()
+    finally:
+        app.renderer.close()
 
 
 if __name__ == "__main__":
