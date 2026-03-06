@@ -74,20 +74,23 @@ python main.py
 运行 `record_episode.py` 脚本开始录制。操作方式与主程序一致，支持三个相机视角。
 
 ```bash
-python record_episode.py --dataset_path my_episode.zarr
+python record_episode.py --dataset_path my_episode.zarr --num_episodes 20 --min_episode_steps 80 --save_partial
 ```
 
-*   **保存机制**: 当任务完成（方块放入目标区域）时，脚本会自动保存数据到指定路径并退出。
-*   **重置**: 如果在录制过程中按 `R` 重置环境，当前的录制缓冲区会被清空，重新开始录制。
-*   **数据格式**: 保存为 Zarr 文件，包含 `state` (关节状态) 和 `action` (末端目标及夹爪状态)，且不分块存储 (single chunk)。
+*   **多回合录制**: 会持续收集成功回合，直到达到 `--num_episodes` 后自动保存并退出。
+*   **质量过滤**: 成功回合长度小于 `--min_episode_steps` 会被自动丢弃；超过 `--max_episode_steps` 的回合会被自动丢弃并重置。
+*   **重置**: 在录制过程中按 `R` 重置，只会丢弃当前回合，不影响之前已经成功的回合。
+*   **动作维度**: 默认保存 4 维动作 `[x, y, z, gripper]`。
+*   **数据格式**: 保存为 ReplayBuffer 兼容的 Zarr 结构：`data/state`、`data/action` 和 `meta/episode_ends`，可直接用于后续 `diffusion_policy` 数据管线。
 
 ### 回放 (Replay)
 
 运行 `replay_episode.py` 脚本回放录制的数据集。
 
 ```bash
-python replay_episode.py --dataset_path my_episode.zarr
+python replay_episode.py --dataset_path my_episode.zarr --episode_idx 0
 ```
 
-*   **初始化**: 脚本会读取数据集的第一帧状态，强制设置环境（包括机械臂和方块位置），确保回放初始条件一致。
-*   **执行**: 脚本将逐帧读取 `action` 并应用到控制器中，复现录制时的运动轨迹。
+*   **初始化**: 脚本会读取目标 episode 的第一帧状态，强制设置环境（包括机械臂和方块位置），确保回放初始条件一致。
+*   **执行**: 脚本会逐帧读取 `action` 并应用到控制器中，复现录制时的运动轨迹。
+*   **兼容性**: 同时兼容新格式（多回合 ReplayBuffer 风格）和旧格式（单回合 `state/action`）。

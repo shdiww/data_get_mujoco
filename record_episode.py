@@ -1,5 +1,5 @@
-from pathlib import Path
 import argparse
+from typing import List, Dict
 
 import glfw
 import mujoco
@@ -13,17 +13,38 @@ from keyboard import InputListener
 from task import PickAndPlaceTask
 from main import converge_ik, _XML, SOLVER, POS_THRESHOLD, ORI_THRESHOLD, MAX_ITERS
 
-def save_dataset(states, actions, filename="episode.zarr"):
-    """保存数据到 Zarr 文件"""
-    print(f"Saving {len(states)} frames to {filename}...")
+def save_dataset(episodes: List[Dict[str, np.ndarray]], filename="episode.zarr"):
+    """保存多条轨迹为 ReplayBuffer 兼容的 Zarr 格式。"""
+    if len(episodes) == 0:
+        print("No completed episodes. Skip saving.")
+        return
+
+    states = np.concatenate([ep["state"] for ep in episodes], axis=0).astype(np.float32)
+    actions = np.concatenate([ep["action"] for ep in episodes], axis=0).astype(np.float32)
+
+    ends = []
+    total = 0
+    for ep in episodes:
+        total += len(ep["state"])
+        ends.append(total)
+    episode_ends = np.array(ends, dtype=np.int64)
+
+    print(f"Saving {len(episodes)} episodes / {len(states)} frames to {filename}...")
     root = zarr.open(filename, mode='w')
-    root.create_dataset('state', data=np.array(states), chunks=False, overwrite=True)
-    root.create_dataset('action', data=np.array(actions), chunks=False, overwrite=True)
+    data_group = root.require_group('data', overwrite=True)
+    meta_group = root.require_group('meta', overwrite=True)
+    data_group.create_dataset('state', data=states, overwrite=True)
+    data_group.create_dataset('action', data=actions, overwrite=True)
+    meta_group.create_dataset('episode_ends', data=episode_ends, overwrite=True)
     print("Done.")
 
 def main():
     parser = argparse.ArgumentParser(description="Record Mujoco episode to Zarr")
     parser.add_argument("--dataset_path", type=str, default="episode.zarr", help="Output path for the zarr dataset")
+    parser.add_argument("--num_episodes", type=int, default=20, help="Number of successful episodes to collect")
+    parser.add_argument("--min_episode_steps", type=int, default=80, help="Minimum steps for a valid episode")
+    parser.add_argument("--max_episode_steps", type=int, default=3000, help="Drop current episode if too long")
+    parser.add_argument("--save_partial", action="store_true", help="Save finished episodes when window closes early")
     args = parser.parse_args()
 
     # 加载MuJoCo模型和数据
@@ -53,6 +74,7 @@ def main():
     glfw.swap_interval(1)
 
     mujoco.mj_resetDataKeyframe(model, data, model.key("home").id)
+    start_qpos = data.qpos.copy()
     task.randomize_box(model, data)
     mujoco.mj_forward(model, data)
 
@@ -91,24 +113,35 @@ def main():
 
     rate = RateLimiter(frequency=200.0, warn=False)
     
-    # 数据缓冲区
-    episode_states = []
-    episode_actions = []
+    # 当前回合缓冲区 + 全部成功回合
+    episode_states: List[np.ndarray] = []
+    episode_actions: List[np.ndarray] = []
+    completed_episodes: List[Dict[str, np.ndarray]] = []
     prev_time = data.time
 
     print("\n--- 开始录制 ---")
-    print("操作完成后会自动保存并退出。")
-    print("按 R 重置 (会清空当前录制缓冲区)")
+    print(f"目标成功回合数: {args.num_episodes}")
+    print(f"最短回合长度: {args.min_episode_steps} steps")
+    print("动作维度: 4 -> [x, y, z, gripper]")
+    print("按 R 重置 (会丢弃当前回合，不影响已成功回合)")
+    print("收集完成后自动保存并退出。")
     print("----------------\n")
+
+    def reset_for_next_episode():
+        task.reset(model, data, start_qpos, configuration, initial_pos, input_listener)
+        posture_task.set_target_from_configuration(configuration)
+
+    user_aborted = False
 
     while not glfw.window_should_close(window):
         dt = rate.dt
 
         # 检测是否发生了重置 (通过时间回跳判断)
         if data.time < prev_time:
+            dropped_len = len(episode_states)
             episode_states = []
             episode_actions = []
-            print("检测到重置，缓冲区已清空。")
+            print(f"检测到重置，已丢弃当前回合 {dropped_len} steps。")
         prev_time = data.time
 
         # 1. 记录当前状态 (State) - 在应用动作之前
@@ -118,13 +151,8 @@ def main():
         # 2. 获取并应用输入 (生成 Action)
         input_listener.update(dt)
         
-        # action: 手柄/键盘信号处理后的末端目标状态 (位置 + 姿态 + 夹爪)
-        # [x, y, z, qw, qx, qy, qz, gripper]
-        action = np.concatenate([
-            data.mocap_pos[0],
-            data.mocap_quat[0],
-            [input_listener.gripper_target]
-        ])
+        # action (4D): [x, y, z, gripper]
+        action = np.concatenate([data.mocap_pos[0], [input_listener.gripper_target]])
         episode_actions.append(action)
 
         # 3. 执行控制 (IK + Step)
@@ -164,13 +192,40 @@ def main():
         mujoco.mjr_render(viewport3, scene, context)
 
         if task.check_completion(model, data):
-            print("任务完成！")
-            save_dataset(episode_states, episode_actions, filename=args.dataset_path)
-            break
+            ep_len = len(episode_states)
+            if ep_len >= args.min_episode_steps:
+                completed_episodes.append({
+                    "state": np.array(episode_states, dtype=np.float32),
+                    "action": np.array(episode_actions, dtype=np.float32),
+                })
+                print(f"任务完成！已保存回合 {len(completed_episodes)}/{args.num_episodes} (steps={ep_len})")
+            else:
+                print(f"任务完成但回合过短 (steps={ep_len} < {args.min_episode_steps})，已丢弃。")
+
+            episode_states = []
+            episode_actions = []
+
+            if len(completed_episodes) >= args.num_episodes:
+                save_dataset(completed_episodes, filename=args.dataset_path)
+                break
+            reset_for_next_episode()
+
+        if len(episode_states) > args.max_episode_steps:
+            print(f"当前回合超过最大长度 {args.max_episode_steps}，已自动丢弃并重置。")
+            episode_states = []
+            episode_actions = []
+            reset_for_next_episode()
 
         glfw.swap_buffers(window)
         glfw.poll_events()
         rate.sleep()
+
+    if glfw.window_should_close(window):
+        user_aborted = True
+
+    if user_aborted and args.save_partial and len(completed_episodes) > 0:
+        print("窗口关闭，按 --save_partial 保存已完成回合。")
+        save_dataset(completed_episodes, filename=args.dataset_path)
 
     glfw.terminate()
 

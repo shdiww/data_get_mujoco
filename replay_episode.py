@@ -16,6 +16,7 @@ from main import converge_ik, _XML, SOLVER, POS_THRESHOLD, ORI_THRESHOLD, MAX_IT
 def main():
     parser = argparse.ArgumentParser(description="Replay Mujoco episode from Zarr")
     parser.add_argument("--dataset_path", type=str, default="episode.zarr", help="Input path for the zarr dataset")
+    parser.add_argument("--episode_idx", type=int, default=0, help="Episode index for replay in multi-episode dataset")
     args = parser.parse_args()
 
     dataset_path = args.dataset_path
@@ -25,9 +26,32 @@ def main():
 
     print(f"正在加载数据集 {dataset_path} ...")
     root = zarr.open(dataset_path, mode='r')
-    states = root['state'][:]
-    actions = root['action'][:]
-    print(f"加载了 {len(states)} 帧数据。")
+
+    # 兼容两种格式：
+    # 1) 新格式: /data/{state,action} + /meta/episode_ends
+    # 2) 旧格式: /{state,action} (单回合)
+    if 'data' in root and 'meta' in root and 'episode_ends' in root['meta']:
+        all_states = root['data']['state']
+        all_actions = root['data']['action']
+        episode_ends = root['meta']['episode_ends'][:]
+        n_eps = len(episode_ends)
+
+        if n_eps == 0:
+            print("错误: 数据集中没有任何 episode。")
+            return
+        if args.episode_idx < 0 or args.episode_idx >= n_eps:
+            print(f"错误: episode_idx={args.episode_idx} 超出范围 [0, {n_eps - 1}]。")
+            return
+
+        start = 0 if args.episode_idx == 0 else int(episode_ends[args.episode_idx - 1])
+        end = int(episode_ends[args.episode_idx])
+        states = all_states[start:end]
+        actions = all_actions[start:end]
+        print(f"加载了 episode {args.episode_idx}/{n_eps - 1}，共 {len(states)} 帧。")
+    else:
+        states = root['state'][:]
+        actions = root['action'][:]
+        print(f"检测到旧格式单回合数据，共 {len(states)} 帧。")
 
     # 加载MuJoCo模型
     model = mujoco.MjModel.from_xml_path(_XML.as_posix())
@@ -91,13 +115,22 @@ def main():
 
         # 1. 读取 Action
         action = actions[i]
-        target_pos = action[:3]
-        target_quat = action[3:7]
-        gripper_target = action[7]
+        if action.shape[0] == 8:
+            # 旧格式: [x, y, z, qw, qx, qy, qz, gripper]
+            target_pos = action[:3]
+            target_quat = action[3:7]
+            gripper_target = action[7]
+            data.mocap_quat[0] = target_quat
+        elif action.shape[0] == 4:
+            # 新格式: [x, y, z, gripper]
+            target_pos = action[:3]
+            gripper_target = action[3]
+        else:
+            print(f"错误: 不支持的 action 维度 {action.shape[0]}，仅支持 4 或 8。")
+            break
 
         # 2. 设置目标 (Action Application)
         data.mocap_pos[0] = target_pos
-        data.mocap_quat[0] = target_quat
 
         # 3. 执行控制 (IK + Step)
         T_wt = mink.SE3.from_mocap_name(model, data, "target")
